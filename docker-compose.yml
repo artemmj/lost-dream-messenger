@@ -24,7 +24,7 @@ services:
       timeout: 3s
       retries: 5
 
-  web:
+  backend:
     build: .
     command: >
       sh -c "python manage.py migrate &&
@@ -44,6 +44,18 @@ services:
         condition: service_healthy
     env_file:
       - .env
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev          # ← dev stage из Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app         # ← Монтируем исходники для HMR
+      - /app/node_modules       # ← Исключаем node_modules из mount (контейнерные зависимости)
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:

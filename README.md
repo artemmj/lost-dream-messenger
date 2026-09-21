@@ -9,12 +9,23 @@ Real-time мессенджер с бэкендом на Django Channels и фр�
 
 | Компонент | Технология | Версия |
 |-----------|-----------|--------|
-| Backend | Django + DRF | 5.1+ / 3.15+ |
-| Database | PostgreSQL | 16 |
+| Backend | Django + DRF + Channels | 5.1+ / 3.15+ / 4.x |
+| Database | PostgreSQL | 18 |
+| Cache/PubSub | Redis | 7 |
 | Auth | JWT (SimpleJWT) | — |
 | API Docs | drf-spectacular (OpenAPI 3.0) | — |
 | Frontend | Vue 3 + TypeScript + Pinia | 3.x |
+| Build Tool | Vite | 6.x |
+| Server | Daphne (ASGI) | — |
 | Containerization | Docker Compose | — |
+
+### Инфраструктура
+- Docker Compose (backend + frontend + PostgreSQL + Redis)
+- Daphne ASGI server
+- Redis Pub/Sub channel layer
+- Swagger UI (`/api/v1/docs/`)
+- Vite dev server с proxy
+- Nginx для production-раздачи frontend
 
 ## ✅ Реализованный функционал
 
@@ -66,7 +77,7 @@ docker compose up --build -d
 docker compose exec web python manage.py createsuperuser
 ```
 
-Dev-клиент (Vue 3)
+Vue 3 SPA (dev)
 http://localhost:8000/api/v1/
 
 Swagger UI
@@ -76,7 +87,7 @@ Django Admin
 http://localhost:8000/admin/
 
 ## 📋 Планы развития
-- [ ] Визуальный онлайн-статус собеседника
+- [x] Визуальный онлайн-статус собеседника
 - [ ] Групповые чаты из UI (создание + управление участниками)
 - [ ] Пагинация сообщений (infinite scroll)
 - [ ] Typing indicators

@@ -5,7 +5,13 @@ from datetime import timedelta
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = "django-insecure-b-lzir18=x4tvtyg())e*dd02@q=05_9!(coe4q*#+v97%_7jd"
 DEBUG = True
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    'backend',           # Docker internal DNS
+    'localhost:5173',    # ← Vite dev server origin
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",

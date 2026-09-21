@@ -8,12 +8,12 @@
 ```
 messenger/                        # Монорепозиторий
 ├── backend/                      # Django API + WebSocket
-│   ├── config/                   # Django project settings
-│   │   ├── settings.py           # DB, REST_FRAMEWORK, SPECTACULAR, JWT, CHANNEL_LAYERS, CORS
+│   ├── config/
+│   │   ├── settings.py           # DB, REST_FRAMEWORK, SPECTACULAR, JWT, CHANNEL_LAYERS
 │   │   ├── asgi.py               # ASGI app (HTTP + WebSocket routing)
-│   │   ├── urls.py               # Root URL config
-│   │   └── wsgi.py               # WSGI fallback (не используется в prod)
-│   ├── messenger/                # Основное приложение
+│   │   ├── urls.py
+│   │   └── wsgi.py               # Fallback (не используется в prod)
+│   ├── messenger/
 │   │   ├── models.py             # User, Chat, Membership, Message
 │   │   ├── serializers.py        # DRF сериалайзеры + Swagger-аннотации
 │   │   ├── views.py              # ViewSets, RegisterView, UserSearchView
@@ -23,25 +23,26 @@ messenger/                        # Монорепозиторий
 │   │   ├── mixins.py             # ChatMembershipMixin
 │   │   ├── admin.py              # Django Admin с inlines
 │   │   ├── urls.py               # Router + custom endpoints + schema
-│   │   └── templates/messenger/  # Legacy embedded dev client (deprecated)
+│   │   └── templates/messenger/  # Legacy embedded client (deprecated)
 │   ├── Dockerfile                # Python 3.12-slim + Daphne
-│   └── requirements.txt          # Django, DRF, Channels, channels_redis
+│   └── requirements.txt
 ├── frontend/                     # Vue 3 SPA
 │   ├── src/
 │   │   ├── assets/styles.css     # Глобальные стили (CSS variables)
 │   │   ├── components/           # ChatSidebar, ChatWindow, MessageBubble, NewChatModal
-│   │   ├── composables/          # useChatSocket (WebSocket composable)
+│   │   ├── composables/          # useChatSocket
 │   │   ├── stores/               # Pinia: auth.ts, chat.ts
 │   │   ├── services/api.ts       # Axios instance + interceptors
 │   │   ├── views/                # LoginView, ChatView
 │   │   ├── router/index.ts       # Vue Router + navigation guards
 │   │   ├── App.vue
 │   │   └── main.ts
-│   ├── vite.config.ts            # Vite + proxy (/api → :8000, /ws → :8000)
-│   ├── package.json
-│   └── tsconfig.json
-├── docker-compose.yml            # web + postgres + redis
-├── .env                          # Secrets (НЕ в git)
+│   ├── vite.config.ts            # Vite + proxy (/api, /ws → backend:8000)
+│   ├── nginx.conf                # Prod: статика + reverse proxy API/WS
+│   ├── Dockerfile                # Multi-stage: dev (Vite) / prod (nginx)
+│   └── package.json
+├── docker-compose.yml            # backend + frontend + postgres + redis
+├── .env
 └── .gitignore
 ```
 
@@ -56,8 +57,9 @@ messenger/                        # Монорепозиторий
 | Redis Pub/Sub channel layer | Устойчив к таймаутам на Docker Desktop (в отличие от BRPOP core) |
 | JWT через query string в WS | WebSocket не поддерживает HTTP-заголовки при handshake |
 | Vite proxy вместо django-cors-headers | Zero CORS в dev, бэкенд не знает о фронтенде |
-| Zustand → Pinia | Нативный state management для Vue 3, DevTools поддержка |
-| @vueuse/core useDebounceFn | Готовые composables вместо самописных решений |
+| Pinia для state management | Нативный store для Vue 3, DevTools поддержка |
+| @vueuse/core | Готовые composables (useDebounceFn) вместо самописных решений |
+| Multi-stage Dockerfile frontend | Dev (Vite HMR) и prod (nginx) из одного Dockerfile |
 | Embedded chat.html (legacy) | Сохранён для быстрой отладки API, не развивается |
 
 ## ✅ Реализовано
@@ -128,17 +130,30 @@ messenger/                        # Монорепозиторий
 - Vite proxy для CORS-free разработки
 
 ### Инфраструктура
-- Docker Compose (web + postgres + redis)
+- Docker Compose (backend + frontend + postgres + redis)
 - Daphne ASGI server (HTTP + WebSocket)
 - Redis Pub/Sub channel layer (`channels_redis.pubsub`)
 - WhiteNoise для статики (Django admin, legacy client)
 - Swagger UI + drf-spectacular
-- Vite dev server с proxy
+- Vite dev server с proxy на backend
+- Nginx для production-раздачи frontend + reverse proxy API/WS
+
+### Frontend (Vue 3 SPA)
+- Auth flow (login/register/logout) с JWT restore из localStorage
+- Protected routes через Vue Router navigation guard
+- Chat sidebar со списком чатов и превью последнего сообщения
+- Chat window с real-time сообщениями через WebSocket
+- Read receipts (✓ серая / ✓✓ зелёная)
+- Индикатор WS-соединения в шапке чата
+- Создание личного чата через модалку с debounced поиском пользователей
+- Авто-reconnect WebSocket с backoff
+- REST fallback при отправке если WS недоступен
+- Vite proxy для CORS-free разработки
+- Docker: dev (Vite HMR) + prod (nginx)
 
 ## 🚧 В планах (приоритет по убыванию)
 
 ### Phase 2: Features
-- [ ] Визуальный онлайн-статус собеседника в шапке чата
 - [ ] Создание групповых чатов из UI
 - [ ] Добавление участников в групповой чат из UI
 - [ ] Пагинация сообщений (scroll up → загрузить ещё)
@@ -154,8 +169,7 @@ messenger/                        # Монорепозиторий
 - [ ] CI/CD (GitHub Actions)
 - [ ] Rate limiting (django-ratelimit)
 - [ ] Logging + Sentry
-- [ ] Nginx reverse proxy + SSL
-- [ ] Production Docker build для frontend
+- [ ] Production deploy (nginx + SSL)
 
 ## ⚠️ Известные ограничения / Tech Debt
 
@@ -163,11 +177,10 @@ messenger/                        # Монорепозиторий
 2. **Нет тестов** — покрытие 0% (backend + frontend)
 3. **SECRET_KEY insecure** — дефолтное значение, менять перед деплоем
 4. **Read receipts per-chat** — нет per-message подтверждения доставки
-5. **Онлайн-статусы только в console.log** — нет визуального индикатора в UI
-6. **Нет soft-delete** — удаление чата/сообщения физическое
-7. **last_seen обновляется при connect/disconnect** — не отражает реальную активность
-8. **Legacy embedded chat.html** — сохранён но не развивается, удалить после стабилизации SPA
-9. **Нет production build для frontend** — только dev mode через Vite
+5. **Нет soft-delete** — удаление чата/сообщения физическое
+6. **last_seen обновляется при connect/disconnect** — не отражает реальную активность
+7. **Legacy embedded chat.html** — сохранён но не развивается
+8. **Нет production build для frontend** — только dev mode через Vite
 
 ## 🔧 Команды разработки
 
@@ -177,23 +190,8 @@ docker compose up --build -d
 docker compose exec web python manage.py makemigrations
 docker compose exec web python manage.py migrate
 docker compose exec web python manage.py shell_plus
-docker compose logs -f web
-
-# Frontend
-cd frontend
-npm install
-npm run dev          # Dev server на :5173 с proxy на :8000
-npm run build        # Production build → dist/
-npm run preview      # Preview production build
+docker compose logs -f
 
 # Полный сброс БД
 docker compose down -v && docker compose up --build -d
-
-# Проверка подключения к БД
-docker compose exec web python -c "
-import django, os
-os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings')
-django.setup()
-from django.db import connection
-print(connection.cursor().execute('SELECT version()').fetchone())
-"
+```
