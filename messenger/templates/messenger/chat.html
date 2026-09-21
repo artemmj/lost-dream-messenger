@@ -173,12 +173,24 @@
         <!-- Chat Area -->
         <div class="chat-area">
             <template v-if="selectedChatId">
-                <div class="chat-header">{{ selectedChatName }}</div>
+                <div class="chat-header">
+                    {{ selectedChatName }}
+                    <span style="font-size:.7rem;margin-left:.5rem;font-weight:400;"
+                          :style="{ color: wsStatus === 'connected' ? '#4caf50' : wsStatus === 'connecting' ? '#ff9800' : '#e74c3c' }">
+                        ● {{ wsStatus === 'connected' ? 'online' : wsStatus === 'connecting' ? 'подключение...' : 'offline' }}
+                    </span>
+                </div>
                 <div class="messages" ref="messagesContainer">
                     <div v-for="msg in messages" :key="msg.id" class="msg" :class="msg.sender.id === currentUser?.id ? 'mine' : 'theirs'">
                         <div v-if="msg.sender.id !== currentUser?.id" class="msg-sender">{{ msg.sender.first_name || msg.sender.phone }}</div>
                         {{ msg.text }}
-                        <div class="msg-meta">{{ formatTime(msg.created_at) }}</div>
+                        <div class="msg-meta">
+                            {{ formatTime(msg.created_at) }}
+                            <span v-if="msg.sender.id === currentUser?.id" style="margin-left:.3rem;"
+                                  :style="{ color: msg.is_read ? '#4caf50' : '#bbb' }">
+                                {{ msg.is_read ? '✓✓' : '✓' }}
+                            </span>
+                        </div>
                     </div>
                     <div v-if="messages.length === 0" style="align-self:center;color:#999;margin-top:2rem;">
                         Начните переписку
@@ -246,6 +258,10 @@ createApp({
         const creatingChat = ref(false);
         const modalError = ref('');
 
+        // --- WebSocket State (НА УРОВНЕ SETUP) ---
+        let ws = null;
+        const wsStatus = ref('disconnected');
+
         // --- Axios Instance ---
         const api = axios.create({ baseURL: API_BASE });
 
@@ -303,7 +319,7 @@ createApp({
         };
 
         const logout = () => {
-            clearInterval(pollTimer);
+            disconnectWS();
             token.value = '';
             refreshToken.value = '';
             currentUser.value = null;
@@ -315,16 +331,11 @@ createApp({
         };
 
         const loadCurrentUser = async () => {
-            // Получаем текущего юзера через первый доступный эндпоинт
-            // Или можно добавить /auth/me/ эндпоинт. Пока используем search по своему телефону
             try {
-                const { data } = await api.get('/users/search/', { params: { q: '' } });
-                // Fallback: декодируем JWT
                 const payload = JSON.parse(atob(token.value.split('.')[1]));
                 currentUser.value = { id: payload.user_id, phone: payload.phone || 'User' };
             } catch {
-                const payload = JSON.parse(atob(token.value.split('.')[1]));
-                currentUser.value = { id: payload.user_id, phone: 'User' };
+                currentUser.value = { id: null, phone: 'User' };
             }
         };
 
@@ -345,6 +356,7 @@ createApp({
         const selectChat = async (chatId) => {
             selectedChatId.value = chatId;
             await loadMessages();
+            connectWS(chatId);
         };
 
         const selectedChatName = Vue.computed(() => {
@@ -366,18 +378,26 @@ createApp({
         const sendMessage = async () => {
             const text = newMessageText.value.trim();
             if (!text || !selectedChatId.value) return;
+
             sendingMessage.value = true;
             try {
-                const { data } = await api.post(`/chats/${selectedChatId.value}/send/`, { text });
-                messages.value.push(data);
+                const sentViaWS = sendWSMessage(text);
+
+                if (!sentViaWS) {
+                    const { data } = await api.post(`/chats/${selectedChatId.value}/send/`, { text });
+                    if (!messages.value.some(m => m.id === data.id)) {
+                        messages.value.push(data);
+                        await nextTick();
+                        scrollToBottom();
+                    }
+                }
+
                 newMessageText.value = '';
-                await nextTick();
-                scrollToBottom();
-                // Обновляем превью в сайдбаре
-                const chat = chats.value.find(c => c.id === selectedChatId.value);
-                if (chat) chat.last_message = data;
-            } catch (e) { console.error('sendMessage', e); }
-            finally { sendingMessage.value = false; }
+            } catch (e) {
+                console.error('sendMessage error:', e);
+            } finally {
+                sendingMessage.value = false;
+            }
         };
 
         const scrollToBottom = () => {
@@ -386,12 +406,88 @@ createApp({
             }
         };
 
+        // --- WebSocket Functions (НА УРОВНЕ SETUP) ---
+        const connectWS = (chatId) => {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            if (!token.value || !chatId) return;
+
+            wsStatus.value = 'connecting';
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws/chat/${chatId}/?token=${token.value}`);
+
+            ws.onopen = () => {
+                wsStatus.value = 'connected';
+                console.log(`[WS] Connected to chat ${chatId}`);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === 'user_status') {
+                        console.log(`[WS] User ${data.user_id} is ${data.status}`);
+                        return;
+                    }
+
+                    if (data.type === 'messages_read') {
+                        // Собеседник открыл чат — помечаем все свои сообщения как прочитанные
+                        messages.value.forEach(m => {
+                            if (m.sender.id === currentUser.value?.id && !m.is_read) {
+                                m.is_read = true;
+                            }
+                        });
+                        return;
+                    }
+
+                    if (data.id && !messages.value.some(m => m.id === data.id)) {
+                        messages.value.push(data);
+                        nextTick(() => scrollToBottom());
+                    }
+                } catch (e) {
+                    console.error('[WS] Parse error:', e);
+                }
+            };
+
+            ws.onclose = (event) => {
+                wsStatus.value = 'disconnected';
+                console.log(`[WS] Closed: ${event.code}`);
+
+                if (![4001, 4003].includes(event.code) && selectedChatId.value === chatId) {
+                    setTimeout(() => {
+                        if (selectedChatId.value === chatId) connectWS(chatId);
+                    }, 2000);
+                }
+            };
+
+            ws.onerror = () => {
+                wsStatus.value = 'error';
+            };
+        };
+
+        const disconnectWS = () => {
+            if (ws) {
+                ws.close(1000, 'Client disconnect');
+                ws = null;
+            }
+            wsStatus.value = 'disconnected';
+        };
+
+        const sendWSMessage = (text) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ text }));
+                return true;
+            }
+            return false;
+        };
+
         // --- New Chat ---
         const createPrivateChat = async () => {
             creatingChat.value = true;
             modalError.value = '';
             try {
-                // Сначала ищем пользователя по телефону
                 const { data: users } = await api.get('/users/search/', { params: { q: interlocutorPhone.value } });
                 const userList = users.results || users;
                 if (!userList.length) {
@@ -417,32 +513,23 @@ createApp({
             return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
         };
 
+        // --- Watchers ---
+        watch(selectedChatId, (newId, oldId) => {
+            if (oldId && oldId !== newId) {
+                disconnectWS();
+            }
+            messages.value = [];
+        });
+
         // --- Init ---
         onMounted(async () => {
             if (token.value) {
                 await loadCurrentUser();
                 await loadChats();
             }
-
-            // 👇 Костыль-поллинг: обновляем сообщения каждые 2 секунды
-            pollTimer = setInterval(async () => {
-                if (token.value && selectedChatId.value) {
-                    try {
-                        const { data } = await api.get(`/chats/${selectedChatId.value}/messages/`);
-                        const newMessages = data.results || data;
-                        // Обновляем только если есть новые сообщения (чтобы не дёргался скролл)
-                        if (newMessages.length > messages.value.length) {
-                            messages.value = newMessages;
-                            await nextTick();
-                            scrollToBottom();
-                        }
-                    } catch (e) { /* тихо игнорируем ошибки поллинга */ }
-                }
-            }, 2000);
         });
 
-        watch(selectedChatId, () => { messages.value = []; });
-
+        // --- Return ---
         return {
             token, isRegister, authLoading, authError, authForm, currentUser,
             toggleAuthMode, handleAuth, logout,
@@ -450,6 +537,7 @@ createApp({
             messages, newMessageText, sendingMessage, sendMessage, messagesContainer,
             showNewChatModal, interlocutorPhone, creatingChat, modalError, createPrivateChat,
             formatTime,
+            wsStatus,
         };
     }
 }).mount('#app');

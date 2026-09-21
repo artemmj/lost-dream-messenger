@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from django.contrib.auth import get_user_model
@@ -115,12 +116,14 @@ class ChatListSerializer(serializers.ModelSerializer):
         model = Chat
         fields = ("id", "type", "name", "created_at", "last_message", "interlocutor")
 
+    @extend_schema_field(MessageSerializer)
     def get_last_message(self, obj):
         # Предварительная выборка (prefetch) должна быть сделана во ViewSet
         if hasattr(obj, "last_msg_list") and obj.last_msg_list:
             return MessageSerializer(obj.last_msg_list[0]).data
         return None
 
+    @extend_schema_field(UserSerializer)
     def get_interlocutor(self, obj):
         if obj.type == Chat.ChatType.PRIVATE:
             request = self.context.get("request")

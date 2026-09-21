@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from django.db.models import Count, Prefetch
 from django.contrib.auth import get_user_model
 from django.views.generic import TemplateView
@@ -33,7 +35,8 @@ class IsAuthenticated(permissions.IsAuthenticated):
 
 class ChatClientView(TemplateView):
     """Dev-only клиент мессенджера. В продакшене заменить на Vue SPA."""
-    template_name = 'messenger/chat.html'
+
+    template_name = "messenger/chat.html"
     permission_classes = [AllowAny]
 
 
@@ -52,6 +55,10 @@ class ChatViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "delete"]
 
     def get_queryset(self):
+        # 👈 Защита от spectular fake view
+        if getattr(self, "swagger_fake_view", False):
+            return Chat.objects.none()
+
         user = self.request.user
         return (
             Chat.objects.filter(members=user)
@@ -111,7 +118,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         tags=["Messages"],
     )
     @action(detail=True, methods=["get"])
-    def messages(self, request, pk=None):
+    def messages(self, request, pk: UUID = None):
         chat = self.get_object()
         if not chat.members.filter(id=request.user.id).exists():
             return Response(
@@ -151,7 +158,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         tags=["Messages"],
     )
     @action(detail=True, methods=["post"], url_path="send")
-    def send_message(self, request, pk=None):
+    def send_message(self, request, pk: UUID = None):
         chat = self.get_object()
         if not chat.members.filter(id=request.user.id).exists():
             return Response(
@@ -190,7 +197,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         tags=["Members"],
     )
     @action(detail=True, methods=["post"], url_path="add-member")
-    def add_member(self, request, pk=None):
+    def add_member(self, request, pk: UUID = None):
         chat = self.get_object()
 
         # Проверка: только админ может добавлять
@@ -230,7 +237,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         tags=["Members"],
     )
     @action(detail=True, methods=["post"], url_path="remove-member")
-    def remove_member(self, request, pk=None):
+    def remove_member(self, request, pk: UUID = None):
         chat = self.get_object()
 
         serializer = RemoveMemberSerializer(data=request.data)
