@@ -3,7 +3,7 @@
 > ⚠️ **Work in Progress**  
 > Проект находится в активной разработке.
 
-Минималистичный бэкенд мессенджера на современном стеке Django с встроенным dev-клиентом для быстрой разработки и тестирования API без настройки отдельного фронтенда.
+Real-time мессенджер с бэкендом на Django Channels и фронтендом на Vue 3.
 
 ## 🛠 Стек
 
@@ -13,27 +13,30 @@
 | Database | PostgreSQL | 16 |
 | Auth | JWT (SimpleJWT) | — |
 | API Docs | drf-spectacular (OpenAPI 3.0) | — |
-| Dev Client | Vue 3 + Axios (CDN, single HTML) | 3.x |
+| Frontend | Vue 3 + TypeScript + Pinia | 3.x |
 | Containerization | Docker Compose | — |
 
 ## ✅ Реализованный функционал
 
 ### Аутентификация
-- Регистрация с валидацией пароля и нормализацией email
+- Регистрация с валидацией пароля
 - JWT login / refresh / logout
 - Авто-refresh токена при 401
+- Восстановление сессии при перезагрузке страницы
 
 ### Чаты
-- Создание групповых и личных чатов
-- Идемпотентное создание личных чатов (без дубликатов)
+- Создание личных чатов (идемпотентно, без дубликатов)
+- Создание групповых чатов
 - Список чатов с последним сообщением
 - Управление участниками (добавление/удаление/выход)
+- Поиск пользователей по телефону/имени
 
 ### Сообщения
-- Отправка текстовых сообщений (WS + REST fallback)
+- Отправка текстовых сообщений
 - История сообщений с пагинацией
 - **Real-time доставка через WebSocket**
 - **Read receipts** (✓ отправлено / ✓✓ прочитано)
+- REST fallback при недоступности WebSocket
 
 ### Real-time (WebSocket)
 - Мгновенная доставка сообщений
@@ -41,14 +44,17 @@
 - Авто-reconnect при разрыве соединения
 - JWT-аутентификация через query string
 
-### Инфраструктура
-- Docker Compose (Django + PostgreSQL + Redis)
-- Daphne ASGI server
-- Redis Pub/Sub channel layer
-- Swagger UI (`/api/v1/docs/`)
-- Встроенный dev-клиент (`/api/v1/`)
+### Frontend (Vue 3 SPA)
+- Авторизация с защищёнными роутами
+- Debounced поиск пользователей для создания чата
+- Индикатор статуса WebSocket-соединения
+- Адаптивный layout (sidebar + chat area)
 
 ## 🚀 Быстрый старт
+
+### Prerequisites
+- Docker & Docker Compose
+- Node.js 20+
 
 ```bash
 # Клонировать и запустить
@@ -70,12 +76,13 @@ Django Admin
 http://localhost:8000/admin/
 
 ## 📋 Планы развития
-
-- [ ] Вынос фронтенда в отдельный репозиторий (Vue 3 + Vite + Pinia)
-- [ ] Загрузка файлов и изображений
+- [ ] Визуальный онлайн-статус собеседника
+- [ ] Групповые чаты из UI (создание + управление участниками)
+- [ ] Пагинация сообщений (infinite scroll)
 - [ ] Typing indicators
-- [ ] Push notifications
+- [ ] Загрузка файлов и изображений
 - [ ] Message editing / deletion
-- [ ] Тесты (pytest + factory_boy)
+- [ ] Тесты (pytest + Vitest)
 - [ ] CI/CD pipeline
 - [ ] Rate limiting
+- [ ] Production deploy (nginx + SSL)
