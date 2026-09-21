@@ -48,23 +48,191 @@ messenger/
 - `Membership` (user ↔ chat + is_admin + unique constraint)
 - `Message` (text + sender FK + is_read + indexed by chat+created_at)
 
-### API Endpoints
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/auth/register/` | Регистрация + JWT в ответе |
-| POST | `/auth/login/` | JWT token pair |
-| POST | `/auth/refresh/` | Refresh access token |
-| GET | `/chats/` | Мои чаты с last_message |
-| POST | `/chats/` | Создать групповой чат |
-| POST | `/chats/private/` | Создать/найти личный чат |
-| GET | `/chats/{id}/` | Детали чата |
-| GET | `/chats/{id}/messages/` | История с пагинацией |
-| POST | `/chats/{id}/send/` | Отправить сообщение |
-| POST | `/chats/{id}/add-member/` | Добавить участника (admin only) |
-| POST | `/chats/{id}/remove-member/` | Удалить / выйти |
-| GET | `/users/search/?q=` | Поиск по телефону/имени |
-| GET | `/docs/` | Swagger UI |
-| GET | `/schema/` | OpenAPI 3.0 schema |
+### 📡 API Endpoints (Detailed)
+
+> Base URL: `/api/v1`  
+> Auth: `Bearer <access_token>` (кроме `/auth/*` и `/docs/`)  
+> Content-Type: `application/json`  
+> Pagination: `PageNumberPagination`, `page_size=50`, response wrapper: `{ count, next, previous, results }`
+
+### Auth
+
+#### `POST /auth/register/`
+Регистрация нового пользователя. Возвращает JWT сразу после создания.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `phone` | string | ✅ | Уникальный номер телефона |
+| → Request | `email` | string | ✅ | Нормализуется в lowercase |
+| → Request | `first_name` | string | ✅ | |
+| → Request | `last_name` | string | ✅ | |
+| → Request | `password` | string | ✅ | Мин. 8 символов, проверяется Django password validators |
+| → Request | `password_confirm` | string | ✅ | Должен совпадать с `password` |
+| ← Response 201 | `user.id` | UUID | | |
+| ← Response 201 | `user.phone` | string | | |
+| ← Response 201 | `user.email` | string | | |
+| ← Response 201 | `user.first_name` | string | | |
+| ← Response 201 | `user.last_name` | string | | |
+| ← Response 201 | `access` | string | | JWT access token |
+| ← Response 201 | `refresh` | string | | JWT refresh token |
+| ← Error 400 | `{field: [errors]}` | object | | Ошибки валидации по полям |
+
+#### `POST /auth/login/`
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `phone` | string | ✅ | |
+| → Request | `password` | string | ✅ | |
+| ← Response 200 | `access` | string | | |
+| ← Response 200 | `refresh` | string | | |
+| ← Error 401 | `detail` | string | | Неверные credentials |
+
+#### `POST /auth/refresh/`
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `refresh` | string | ✅ | Refresh token |
+| ← Response 200 | `access` | string | | Новый access token |
+| ← Error 401 | `detail` | string | | Invalid/expired refresh |
+
+---
+
+### Chats
+
+#### `GET /chats/`
+Список чатов текущего пользователя. Оптимизирован через `prefetch_related`.
+
+| Direction | Field | Type | Description |
+|-----------|-------|------|-------------|
+| ← Response | `results[].id` | UUID | |
+| ← Response | `results[].type` | enum | `PRIVATE` \| `GROUP` |
+| ← Response | `results[].name` | string | Название группового чата (пусто для PRIVATE) |
+| ← Response | `results[].created_at` | ISO 8601 | |
+| ← Response | `results[].last_message` | Message \| null | Полное сообщение или null |
+| ← Response | `results[].interlocutor` | User \| null | Собеседник для PRIVATE, null для GROUP |
+
+#### `POST /chats/`
+Создание группового чата. Создатель автоматически становится админом.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `name` | string | ❌ | Название чата |
+| → Request | `type` | enum | ❌ | По умолчанию `GROUP` |
+| ← Response 201 | ChatDetail | object | Полный объект чата |
+
+#### `POST /chats/private/`
+Создание или получение существующего личного чата. Идемпотентен.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `interlocutor_id` | UUID | ✅ | ID второго участника |
+| ← Response 200 | ChatDetail | object | Существующий чат найден |
+| ← Response 201 | ChatDetail | object | Новый чат создан |
+| ← Error 400 | `detail` | string | Нельзя с собой / пользователь не найден |
+
+#### `GET /chats/{id}/`
+Детальная информация о чате со списком участников.
+
+| Direction | Field | Type | Description |
+|-----------|-------|------|-------------|
+| ← Response | `id` | UUID | |
+| ← Response | `type` | enum | `PRIVATE` \| `GROUP` |
+| ← Response | `name` | string | |
+| ← Response | `members[]` | User[] | Список всех участников |
+| ← Response | `created_at` | ISO 8601 | |
+
+---
+
+### Messages
+
+#### `GET /chats/{id}/messages/`
+История сообщений с пагинацией. Требует участия в чате.
+
+| Direction | Field | Type | Description |
+|-----------|-------|------|-------------|
+| → Query | `page` | int | Номер страницы (optional) |
+| ← Response | `results[].id` | UUID | |
+| ← Response | `results[].chat` | UUID | |
+| ← Response | `results[].sender` | User | Вложенный объект отправителя |
+| ← Response | `results[].text` | string | Текст сообщения |
+| ← Response | `results[].created_at` | ISO 8601 | |
+| ← Response | `results[].is_read` | bool | Флаг прочтения |
+| ← Error 403 | `detail` | string | Не участник чата |
+
+#### `POST /chats/{id}/send/`
+Отправка сообщения. `chat` и `sender` определяются автоматически.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `text` | string | ✅ | 1–5000 символов, не может быть пустым |
+| ← Response 201 | Message | object | Полное созданное сообщение с sender |
+| ← Error 400 | `text` | array | Ошибки валидации текста |
+| ← Error 403 | `detail` | string | Не участник чата |
+
+---
+
+### Members
+
+#### `POST /chats/{id}/add-member/`
+Добавление участника. Требуются права администратора.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `user_id` | UUID | ✅ | ID добавляемого пользователя |
+| ← Response 201 | `detail` | string | Подтверждение добавления |
+| ← Error 400 | `detail` | string | Пользователь уже в чате / не найден |
+| ← Error 403 | `detail` | string | Нет прав админа / не участник |
+
+#### `POST /chats/{id}/remove-member/`
+Удаление участника. Админ может удалять других, обычный участник — только себя.
+
+| Direction | Field | Type | Required | Description |
+|-----------|-------|------|----------|-------------|
+| → Request | `user_id` | UUID | ✅ | ID удаляемого пользователя |
+| ← Response 200 | `detail` | string | Подтверждение удаления |
+| ← Response 200 | `detail` | string | «Чат удалён» если не осталось участников |
+| ← Error 400 | `detail` | string | Нельзя удалить единственного админа |
+| ← Error 403 | `detail` | string | Нет прав |
+| ← Error 404 | `detail` | string | Участник не найден в чате |
+
+---
+
+### Users
+
+#### `GET /users/search/?q=`
+Поиск пользователей по телефону или имени. Исключает текущего пользователя. Максимум 20 результатов.
+
+| Direction | Field | Type | Description |
+|-----------|-------|------|-------------|
+| → Query | `q` | string | Поиск по phone / first_name / last_name (icontains) |
+| ← Response | `results[].id` | UUID | |
+| ← Response | `results[].phone` | string | |
+| ← Response | `results[].email` | string | |
+| ← Response | `results[].first_name` | string | |
+| ← Response | `results[].last_name` | string | |
+| ← Response | `[]` | array | Пустой массив при отсутствии результатов или пустом `q` |
+
+---
+
+### Общие объекты (Reference)
+
+**User:**
+```json
+{ "id": "uuid", "phone": "+7999...", "email": "...", "first_name": "...", "last_name": "..." }
+```
+
+**Message:**
+```json
+{ "id": "uuid", "chat": "uuid", "sender": { "User" }, "text": "...", "created_at": "ISO8601", "is_read": false }
+```
+
+**ChatDetail:**
+```json
+{ "id": "uuid", "type": "PRIVATE|GROUP", "name": "...", "members": ["User"], "created_at": "ISO8601" }
+```
+
+**Paginated Response:**
+```json
+{ "count": 150, "next": "/api/v1/chats/?page=2", "previous": null, "results": [] }
+```
 
 ### Dev Client
 - Single-file Vue 3 SPA в `templates/messenger/chat.html`
