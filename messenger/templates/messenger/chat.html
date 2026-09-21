@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messenger Dev Client</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #f0f2f5; height: 100vh; }
+
+        /* --- Auth Screen --- */
+        .auth-screen {
+            display: flex; align-items: center; justify-content: center;
+            height: 100vh;
+        }
+        .auth-card {
+            background: #fff; padding: 2rem; border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.1); width: 360px;
+        }
+        .auth-card h2 { margin-bottom: 1.5rem; text-align: center; }
+        .auth-card input, .auth-card button {
+            width: 100%; padding: .7rem; margin-bottom: .8rem;
+            border: 1px solid #ddd; border-radius: 8px; font-size: 1rem;
+        }
+        .auth-card button {
+            background: #4a90d9; color: #fff; border: none; cursor: pointer;
+        }
+        .auth-card button:hover { background: #357abd; }
+        .auth-toggle { text-align: center; margin-top: .5rem; color: #4a90d9; cursor: pointer; font-size: .9rem; }
+        .error-msg { color: #e74c3c; font-size: .85rem; margin-bottom: .5rem; }
+
+        /* --- Chat Layout --- */
+        .chat-layout { display: flex; height: 100vh; }
+
+        /* Sidebar */
+        .sidebar {
+            width: 320px; background: #fff; border-right: 1px solid #e0e0e0;
+            display: flex; flex-direction: column; flex-shrink: 0;
+        }
+        .sidebar-header {
+            padding: 1rem; border-bottom: 1px solid #e0e0e0;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .sidebar-header span { font-weight: 600; }
+        .logout-btn {
+            background: none; border: none; color: #e74c3c;
+            cursor: pointer; font-size: .85rem;
+        }
+        .chat-list { flex: 1; overflow-y: auto; }
+        .chat-item {
+            padding: .8rem 1rem; border-bottom: 1px solid #f0f0f0;
+            cursor: pointer; transition: background .15s;
+        }
+        .chat-item:hover { background: #f5f7fa; }
+        .chat-item.active { background: #e8f0fe; }
+        .chat-item-name { font-weight: 600; font-size: .95rem; }
+        .chat-item-preview { color: #888; font-size: .8rem; margin-top: .2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .new-chat-btn {
+            margin: .8rem; padding: .6rem; background: #4a90d9; color: #fff;
+            border: none; border-radius: 8px; cursor: pointer; font-size: .9rem;
+        }
+
+        /* Chat Area */
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: #e5ddd5; }
+        .chat-header {
+            padding: .8rem 1.2rem; background: #fff; border-bottom: 1px solid #e0e0e0;
+            font-weight: 600;
+        }
+        .messages {
+            flex: 1; overflow-y: auto; padding: 1rem; display: flex;
+            flex-direction: column; gap: .4rem;
+        }
+        .msg { max-width: 70%; padding: .5rem .8rem; border-radius: 10px; font-size: .9rem; word-wrap: break-word; }
+        .msg.mine { align-self: flex-end; background: #dcf8c6; }
+        .msg.theirs { align-self: flex-start; background: #fff; }
+        .msg-meta { font-size: .7rem; color: #999; margin-top: .15rem; text-align: right; }
+        .msg-sender { font-size: .7rem; color: #4a90d9; margin-bottom: .1rem; font-weight: 600; }
+
+        .input-area {
+            padding: .8rem; background: #fff; display: flex; gap: .5rem;
+            border-top: 1px solid #e0e0e0;
+        }
+        .input-area input {
+            flex: 1; padding: .6rem; border: 1px solid #ddd;
+            border-radius: 20px; font-size: .9rem; outline: none;
+        }
+        .input-area button {
+            padding: .6rem 1.2rem; background: #4a90d9; color: #fff;
+            border: none; border-radius: 20px; cursor: pointer; font-size: .9rem;
+        }
+        .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: #999; }
+
+        /* New Chat Modal */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,.4);
+            display: flex; align-items: center; justify-content: center; z-index: 10;
+        }
+        .modal {
+            background: #fff; padding: 1.5rem; border-radius: 12px; width: 360px;
+        }
+        .modal h3 { margin-bottom: 1rem; }
+        .modal input, .modal button {
+            width: 100%; padding: .6rem; margin-bottom: .6rem;
+            border: 1px solid #ddd; border-radius: 8px; font-size: .9rem;
+        }
+        .modal button.primary { background: #4a90d9; color: #fff; border: none; cursor: pointer; }
+        .modal button.secondary { background: #eee; border: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+{% verbatim %}
+<div id="app">
+
+    <!-- ===== AUTH SCREEN ===== -->
+    <div v-if="!token" class="auth-screen">
+        <div class="auth-card">
+            <h2>{{ isRegister ? 'Регистрация' : 'Вход' }}</h2>
+            <div v-if="authError" class="error-msg">{{ authError }}</div>
+
+            <template v-if="isRegister">
+                <input v-model="authForm.phone" placeholder="Телефон (+79991234567)" />
+                <input v-model="authForm.email" placeholder="Email" />
+                <input v-model="authForm.first_name" placeholder="Имя" />
+                <input v-model="authForm.last_name" placeholder="Фамилия" />
+                <input v-model="authForm.password" type="password" placeholder="Пароль" />
+                <input v-model="authForm.password_confirm" type="password" placeholder="Подтвердите пароль" />
+            </template>
+            <template v-else>
+                <input v-model="authForm.phone" placeholder="Телефон (+79991234567)" />
+                <input v-model="authForm.password" type="password" placeholder="Пароль" />
+            </template>
+
+            <button @click="handleAuth" :disabled="authLoading">
+                {{ authLoading ? '...' : (isRegister ? 'Зарегистрироваться' : 'Войти') }}
+            </button>
+            <div class="auth-toggle" @click="toggleAuthMode">
+                {{ isRegister ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Зарегистрироваться' }}
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== CHAT LAYOUT ===== -->
+    <div v-else class="chat-layout">
+
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <span>{{ currentUser?.phone }}</span>
+                <button class="logout-btn" @click="logout">Выйти</button>
+            </div>
+            <div class="chat-list">
+                <div
+                    v-for="chat in chats"
+                    :key="chat.id"
+                    class="chat-item"
+                    :class="{ active: selectedChatId === chat.id }"
+                    @click="selectChat(chat.id)"
+                >
+                    <div class="chat-item-name">{{ getChatName(chat) }}</div>
+                    <div class="chat-item-preview">
+                        {{ chat.last_message ? chat.last_message.text : 'Нет сообщений' }}
+                    </div>
+                </div>
+                <div v-if="chats.length === 0" style="padding:1rem;color:#999;text-align:center;">
+                    Нет чатов
+                </div>
+            </div>
+            <button class="new-chat-btn" @click="showNewChatModal = true">+ Новый чат</button>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="chat-area">
+            <template v-if="selectedChatId">
+                <div class="chat-header">{{ selectedChatName }}</div>
+                <div class="messages" ref="messagesContainer">
+                    <div v-for="msg in messages" :key="msg.id" class="msg" :class="msg.sender.id === currentUser?.id ? 'mine' : 'theirs'">
+                        <div v-if="msg.sender.id !== currentUser?.id" class="msg-sender">{{ msg.sender.first_name || msg.sender.phone }}</div>
+                        {{ msg.text }}
+                        <div class="msg-meta">{{ formatTime(msg.created_at) }}</div>
+                    </div>
+                    <div v-if="messages.length === 0" style="align-self:center;color:#999;margin-top:2rem;">
+                        Начните переписку
+                    </div>
+                </div>
+                <div class="input-area">
+                    <input
+                        v-model="newMessageText"
+                        @keyup.enter="sendMessage"
+                        placeholder="Сообщение..."
+                        :disabled="sendingMessage"
+                    />
+                    <button @click="sendMessage" :disabled="!newMessageText.trim() || sendingMessage">
+                        {{ sendingMessage ? '...' : '→' }}
+                    </button>
+                </div>
+            </template>
+            <div v-else class="empty-state">Выберите чат или создайте новый</div>
+        </div>
+    </div>
+
+    <!-- ===== NEW CHAT MODAL ===== -->
+    <div v-if="showNewChatModal" class="modal-overlay" @click.self="showNewChatModal = false">
+        <div class="modal">
+            <h3>Новый личный чат</h3>
+            <div v-if="modalError" class="error-msg">{{ modalError }}</div>
+            <input v-model="interlocutorPhone" placeholder="Телефон собеседника" @keyup.enter="createPrivateChat" />
+            <button class="primary" @click="createPrivateChat" :disabled="creatingChat">
+                {{ creatingChat ? '...' : 'Создать / Найти' }}
+            </button>
+            <button class="secondary" @click="showNewChatModal = false">Отмена</button>
+        </div>
+    </div>
+
+</div>
+{% endverbatim %}
+<script>
+const { createApp, ref, reactive, onMounted, nextTick, watch } = Vue;
+
+const API_BASE = '/api/v1';
+
+createApp({
+    setup() {
+        // --- State ---
+        const token = ref(localStorage.getItem('access_token') || '');
+        const refreshToken = ref(localStorage.getItem('refresh_token') || '');
+        const currentUser = ref(null);
+        const isRegister = ref(false);
+        const authLoading = ref(false);
+        const authError = ref('');
+        const authForm = reactive({
+            phone: '', email: '', first_name: '', last_name: '',
+            password: '', password_confirm: ''
+        });
+
+        const chats = ref([]);
+        const selectedChatId = ref(null);
+        const messages = ref([]);
+        const newMessageText = ref('');
+        const sendingMessage = ref(false);
+        const messagesContainer = ref(null);
+
+        const showNewChatModal = ref(false);
+        const interlocutorPhone = ref('');
+        const creatingChat = ref(false);
+        const modalError = ref('');
+
+        // --- Axios Instance ---
+        const api = axios.create({ baseURL: API_BASE });
+
+        api.interceptors.request.use(config => {
+            if (token.value) config.headers.Authorization = `Bearer ${token.value}`;
+            return config;
+        });
+
+        api.interceptors.response.use(
+            res => res,
+            async error => {
+                if (error.response?.status === 401 && refreshToken.value) {
+                    try {
+                        const { data } = await axios.post(`${API_BASE}/auth/refresh/`, { refresh: refreshToken.value });
+                        token.value = data.access;
+                        localStorage.setItem('access_token', data.access);
+                        error.config.headers.Authorization = `Bearer ${data.access}`;
+                        return api(error.config);
+                    } catch { logout(); }
+                }
+                return Promise.reject(error);
+            }
+        );
+
+        // --- Auth ---
+        const toggleAuthMode = () => {
+            isRegister.value = !isRegister.value;
+            authError.value = '';
+            Object.assign(authForm, { phone: '', email: '', first_name: '', last_name: '', password: '', password_confirm: '' });
+        };
+
+        const handleAuth = async () => {
+            authLoading.value = true;
+            authError.value = '';
+            try {
+                if (isRegister.value) {
+                    const { data } = await api.post('/auth/register/', authForm);
+                    token.value = data.access;
+                    refreshToken.value = data.refresh;
+                    currentUser.value = data.user;
+                } else {
+                    const { data } = await api.post('/auth/login/', { phone: authForm.phone, password: authForm.password });
+                    token.value = data.access;
+                    refreshToken.value = data.refresh;
+                }
+                localStorage.setItem('access_token', token.value);
+                localStorage.setItem('refresh_token', refreshToken.value);
+                if (!currentUser.value) await loadCurrentUser();
+            } catch (e) {
+                const detail = e.response?.data;
+                if (typeof detail === 'string') authError.value = detail;
+                else if (detail?.detail) authError.value = detail.detail;
+                else authError.value = JSON.stringify(detail || 'Ошибка');
+            } finally { authLoading.value = false; }
+        };
+
+        const logout = () => {
+            clearInterval(pollTimer);
+            token.value = '';
+            refreshToken.value = '';
+            currentUser.value = null;
+            chats.value = [];
+            selectedChatId.value = null;
+            messages.value = [];
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+        };
+
+        const loadCurrentUser = async () => {
+            // Получаем текущего юзера через первый доступный эндпоинт
+            // Или можно добавить /auth/me/ эндпоинт. Пока используем search по своему телефону
+            try {
+                const { data } = await api.get('/users/search/', { params: { q: '' } });
+                // Fallback: декодируем JWT
+                const payload = JSON.parse(atob(token.value.split('.')[1]));
+                currentUser.value = { id: payload.user_id, phone: payload.phone || 'User' };
+            } catch {
+                const payload = JSON.parse(atob(token.value.split('.')[1]));
+                currentUser.value = { id: payload.user_id, phone: 'User' };
+            }
+        };
+
+        // --- Chats ---
+        const loadChats = async () => {
+            try {
+                const { data } = await api.get('/chats/');
+                chats.value = data.results || data;
+            } catch (e) { console.error('loadChats', e); }
+        };
+
+        const getChatName = (chat) => {
+            if (chat.name) return chat.name;
+            if (chat.interlocutor) return chat.interlocutor.first_name || chat.interlocutor.phone;
+            return chat.type === 'GROUP' ? 'Групповой чат' : 'Личный чат';
+        };
+
+        const selectChat = async (chatId) => {
+            selectedChatId.value = chatId;
+            await loadMessages();
+        };
+
+        const selectedChatName = Vue.computed(() => {
+            const chat = chats.value.find(c => c.id === selectedChatId.value);
+            return chat ? getChatName(chat) : '';
+        });
+
+        // --- Messages ---
+        const loadMessages = async () => {
+            if (!selectedChatId.value) return;
+            try {
+                const { data } = await api.get(`/chats/${selectedChatId.value}/messages/`);
+                messages.value = data.results || data;
+                await nextTick();
+                scrollToBottom();
+            } catch (e) { console.error('loadMessages', e); }
+        };
+
+        const sendMessage = async () => {
+            const text = newMessageText.value.trim();
+            if (!text || !selectedChatId.value) return;
+            sendingMessage.value = true;
+            try {
+                const { data } = await api.post(`/chats/${selectedChatId.value}/send/`, { text });
+                messages.value.push(data);
+                newMessageText.value = '';
+                await nextTick();
+                scrollToBottom();
+                // Обновляем превью в сайдбаре
+                const chat = chats.value.find(c => c.id === selectedChatId.value);
+                if (chat) chat.last_message = data;
+            } catch (e) { console.error('sendMessage', e); }
+            finally { sendingMessage.value = false; }
+        };
+
+        const scrollToBottom = () => {
+            if (messagesContainer.value) {
+                messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+            }
+        };
+
+        // --- New Chat ---
+        const createPrivateChat = async () => {
+            creatingChat.value = true;
+            modalError.value = '';
+            try {
+                // Сначала ищем пользователя по телефону
+                const { data: users } = await api.get('/users/search/', { params: { q: interlocutorPhone.value } });
+                const userList = users.results || users;
+                if (!userList.length) {
+                    modalError.value = 'Пользователь не найден';
+                    return;
+                }
+                const interlocutor = userList[0];
+
+                const { data: chat } = await api.post('/chats/private/', { interlocutor_id: interlocutor.id });
+                showNewChatModal.value = false;
+                interlocutorPhone.value = '';
+                await loadChats();
+                selectChat(chat.id);
+            } catch (e) {
+                modalError.value = e.response?.data?.detail || JSON.stringify(e.response?.data) || 'Ошибка создания чата';
+            } finally { creatingChat.value = false; }
+        };
+
+        // --- Utils ---
+        const formatTime = (iso) => {
+            if (!iso) return '';
+            const d = new Date(iso);
+            return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        };
+
+        // --- Init ---
+        onMounted(async () => {
+            if (token.value) {
+                await loadCurrentUser();
+                await loadChats();
+            }
+
+            // 👇 Костыль-поллинг: обновляем сообщения каждые 2 секунды
+            pollTimer = setInterval(async () => {
+                if (token.value && selectedChatId.value) {
+                    try {
+                        const { data } = await api.get(`/chats/${selectedChatId.value}/messages/`);
+                        const newMessages = data.results || data;
+                        // Обновляем только если есть новые сообщения (чтобы не дёргался скролл)
+                        if (newMessages.length > messages.value.length) {
+                            messages.value = newMessages;
+                            await nextTick();
+                            scrollToBottom();
+                        }
+                    } catch (e) { /* тихо игнорируем ошибки поллинга */ }
+                }
+            }, 2000);
+        });
+
+        watch(selectedChatId, () => { messages.value = []; });
+
+        return {
+            token, isRegister, authLoading, authError, authForm, currentUser,
+            toggleAuthMode, handleAuth, logout,
+            chats, selectedChatId, selectedChatName, getChatName, selectChat,
+            messages, newMessageText, sendingMessage, sendMessage, messagesContainer,
+            showNewChatModal, interlocutorPhone, creatingChat, modalError, createPrivateChat,
+            formatTime,
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
