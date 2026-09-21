@@ -4,15 +4,19 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
+    host: '0.0.0.0',
+    port: 5173,
+    watch: {
+      usePolling: true,
+    },
     proxy: {
-      // Все запросы к /api и /ws проксируются на Django
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://backend:8000',   // ← Docker internal DNS, всегда backend:8000
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8000',
-        ws: true, // Включаем проксирование WebSocket
+        target: 'ws://backend:8000',     // ← Docker internal DNS
+        ws: true,
       },
     },
   },
