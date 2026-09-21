@@ -6,20 +6,22 @@ import api from '../services/api'
 function getUserFromToken() {
   try {
     const token = localStorage.getItem('access_token')
-    if (!token) return null  // 👈 null уже обрабатывается выше
-
+    if (!token) return null
     const parts = token.split('.')
-    if (parts.length < 3) return null  // 👈 Защита от malformed JWT
-
-    const payload = JSON.parse(atob(parts[1]))  // ✅ parts[1] гарантированно string
-
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(atob(parts[1] as string))
     if (payload.exp && payload.exp * 1000 < Date.now()) {
       localStorage.removeItem('access_token')
       localStorage.removeItem('refresh_token')
       return null
     }
-
-    return { id: payload.user_id, phone: payload.phone || '' }
+    // Возвращаем базовые данные из JWT, полный профиль загрузится в onMounted
+    return {
+      id: payload.user_id,
+      phone: payload.phone || '',
+      first_name: payload.first_name || '',
+      last_name: payload.last_name || '',
+    }
   } catch {
     return null
   }
@@ -41,10 +43,35 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('access_token', data.access)
       localStorage.setItem('refresh_token', data.refresh)
 
-      // ✅ Безопасный decode
-      const parts = data.access.split('.')
-      const payload = parts.length === 3 ? JSON.parse(atob(parts[1])) : {}
-      user.value = { id: payload.user_id, phone }
+      // Загружаем полный профиль через search по своему телефону
+      // (login endpoint не возвращает user object)
+      try {
+        const { data: users } = await api.get('/users/search/', { params: { q: phone } })
+        const userList = Array.isArray(users) ? users : users.results || []
+        if (userList.length > 0) {
+          user.value = userList[0]
+        } else {
+          // Fallback: decode из JWT
+          const parts = data.access.split('.')
+          const payload = parts.length === 3 ? JSON.parse(atob(parts[1])) : {}
+          user.value = {
+            id: payload.user_id as string,
+            phone,
+            first_name: '',
+            last_name: '',
+          }
+        }
+      } catch {
+        // Если search не сработал — fallback на JWT decode
+        const parts = data.access.split('.')
+        const payload = parts.length === 3 ? JSON.parse(atob(parts[1])) : {}
+        user.value = {
+          id: payload.user_id as string,
+          phone,
+          first_name: '',
+          last_name: '',
+        }
+      }
     } catch (e: any) {
       error.value = e.response?.data?.detail || 'Ошибка входа'
     } finally {
