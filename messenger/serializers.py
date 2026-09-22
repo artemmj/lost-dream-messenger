@@ -88,6 +88,15 @@ class RegisterResponseSerializer(serializers.Serializer):
     refresh = serializers.CharField()
 
 
+class MeSerializer(serializers.ModelSerializer):
+    """Сериалайзер профиля текущего пользователя. Read-only."""
+
+    class Meta:
+        model = User
+        fields = ("id", "phone", "email", "first_name", "last_name", "last_seen")
+        read_only_fields = fields
+
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User

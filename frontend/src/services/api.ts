@@ -37,4 +37,6 @@ api.interceptors.response.use(
   },
 )
 
+export const fetchMe = () => api.get('/auth/me/')
+
 export default api

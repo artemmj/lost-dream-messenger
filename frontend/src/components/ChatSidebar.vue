@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import NewChatModal from './NewChatModal.vue'
-import api from '../services/api'
+// import api from '../services/api'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -18,8 +18,9 @@ const showModal = ref(false)
 const displayName = computed(() => {
   const u = auth.user
   if (!u) return ''
-  if (u.first_name) return u.first_name
-  if (u.phone) return u.phone
+  // Проверяем что значение существует И не пустая строка
+  if (u.first_name && u.first_name.trim()) return u.first_name
+  if (u.phone && u.phone.trim()) return u.phone
   return 'Пользователь'
 })
 
@@ -27,19 +28,19 @@ const displayName = computed(() => {
  * При монтировании загружаем полный профиль если есть только базовые данные.
  * Это нужно после перезагрузки страницы когда user восстановлен из JWT.
  */
-onMounted(async () => {
-  if (auth.user && !auth.user.first_name && auth.user.phone) {
-    try {
-      const { data } = await api.get('/users/search/', { params: { q: auth.user.phone } })
-      const userList = Array.isArray(data) ? data : data.results || []
-      if (userList.length > 0) {
-        auth.user = userList[0]
-      }
-    } catch {
-      // Тихо игнорируем, displayName покажет phone
-    }
-  }
-})
+// onMounted(async () => {
+//   if (auth.user && !auth.user.first_name && auth.user.phone) {
+//     try {
+//       const { data } = await api.get('/users/search/', { params: { q: auth.user.phone } })
+//       const userList = Array.isArray(data) ? data : data.results || []
+//       if (userList.length > 0) {
+//         auth.user = userList[0]
+//       }
+//     } catch {
+//       // Тихо игнорируем, displayName покажет phone
+//     }
+//   }
+// })
 
 function handleLogout() {
   chatStore.resetMessages()
@@ -57,7 +58,7 @@ function getChatName(chat: any): string {
 <template>
   <div class="sidebar">
     <div class="sidebar-header">
-      <span>{{ auth.user?.phone }}</span>
+      <span>{{ displayName }}</span>
       <button class="logout-btn" @click="handleLogout">Выйти</button>
     </div>
     <div class="chat-list">

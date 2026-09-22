@@ -51,6 +51,7 @@ messenger/                        # Монорепозиторий
 | Решение | Обоснование |
 |---------|-------------|
 | UUID PK во всех моделях | Безопасность (нет enumeration), совместимость с distributed |
+| /auth/me/ вместо search по себе | Надёжное получение профиля без зависимости от search-эндпоинта |
 | `phone` как USERNAME_FIELD | Мессенджер-ориентированная идентификация |
 | Промежуточная модель Membership | Расширяемость (роли, mute, ban) без изменения основных моделей |
 | Daphne вместо Gunicorn | Единый ASGI-сервер для HTTP + WebSocket |
@@ -77,6 +78,7 @@ messenger/                        # Монорепозиторий
 | POST | `/auth/register/` | Регистрация + JWT в ответе |
 | POST | `/auth/login/` | JWT token pair |
 | POST | `/auth/refresh/` | Refresh access token |
+| GET | /auth/me/ | Профиль текущего пользователя (по JWT) |
 | GET | `/chats/` | Мои чаты с last_message |
 | POST | `/chats/` | Создать групповой чат |
 | POST | `/chats/private/` | Создать/найти личный чат (идемпотентно) |
@@ -179,8 +181,7 @@ messenger/                        # Монорепозиторий
 4. **Read receipts per-chat** — нет per-message подтверждения доставки
 5. **Нет soft-delete** — удаление чата/сообщения физическое
 6. **last_seen обновляется при connect/disconnect** — не отражает реальную активность
-7. **Legacy embedded chat.html** — сохранён но не развивается
-8. **Нет production build для frontend** — только dev mode через Vite
+7. **Нет production build для frontend** — только dev mode через Vite
 
 ## 🔧 Команды разработки
 

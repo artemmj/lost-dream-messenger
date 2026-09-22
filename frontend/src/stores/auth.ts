@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+
+import { fetchMe } from '../services/api'
 import api from '../services/api'
 
 /** Декодируем JWT payload без запроса к API */
@@ -43,33 +45,21 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('access_token', data.access)
       localStorage.setItem('refresh_token', data.refresh)
 
-      // Загружаем полный профиль через search по своему телефону
-      // (login endpoint не возвращает user object)
+      // Загружаем полный профиль через /auth/me/
       try {
-        const { data: users } = await api.get('/users/search/', { params: { q: phone } })
-        const userList = Array.isArray(users) ? users : users.results || []
-        if (userList.length > 0) {
-          user.value = userList[0]
-        } else {
-          // Fallback: decode из JWT
-          const parts = data.access.split('.')
-          const payload = parts.length === 3 ? JSON.parse(atob(parts[1])) : {}
+        const { data: profile } = await fetchMe()
+        user.value = profile
+      } catch {
+        // Fallback если /me/ не сработал
+        const parts = data.access.split('.')
+        if (parts.length === 3) {
+          const payload = JSON.parse(atob(parts[1] as string))
           user.value = {
             id: payload.user_id as string,
             phone,
             first_name: '',
             last_name: '',
           }
-        }
-      } catch {
-        // Если search не сработал — fallback на JWT decode
-        const parts = data.access.split('.')
-        const payload = parts.length === 3 ? JSON.parse(atob(parts[1])) : {}
-        user.value = {
-          id: payload.user_id as string,
-          phone,
-          first_name: '',
-          last_name: '',
         }
       }
     } catch (e: any) {
@@ -86,7 +76,14 @@ export const useAuthStore = defineStore('auth', () => {
       const { data } = await api.post('/auth/register/', form)
       localStorage.setItem('access_token', data.access)
       localStorage.setItem('refresh_token', data.refresh)
-      user.value = data.user
+
+      // Загружаем профиль через /auth/me/ вместо использования data.user
+      try {
+        const { data: profile } = await fetchMe()
+        user.value = profile
+      } catch {
+        user.value = data.user || null
+      }
     } catch (e: any) {
       const d = e.response?.data
       error.value = typeof d === 'string' ? d : d?.detail || JSON.stringify(d) || 'Ошибка'

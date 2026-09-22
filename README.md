@@ -14,7 +14,7 @@ Real-time мессенджер с бэкендом на Django Channels и фр�
 | Cache/PubSub | Redis | 7 |
 | Auth | JWT (SimpleJWT) | — |
 | API Docs | drf-spectacular (OpenAPI 3.0) | — |
-| Frontend | Vue 3 + TypeScript + Pinia | 3.x |
+| Frontend | Vue 3 + Vite + TypeScript + Pinia | 3.x / 6.x |
 | Build Tool | Vite | 6.x |
 | Server | Daphne (ASGI) | — |
 | Containerization | Docker Compose | — |
@@ -34,6 +34,7 @@ Real-time мессенджер с бэкендом на Django Channels и фр�
 - JWT login / refresh / logout
 - Авто-refresh токена при 401
 - Восстановление сессии при перезагрузке страницы
+- Эндпоинт /auth/me/ для получения профиля по токену
 
 ### Чаты
 - Создание личных чатов (идемпотентно, без дубликатов)
@@ -77,14 +78,13 @@ docker compose up --build -d
 docker compose exec web python manage.py createsuperuser
 ```
 
-Vue 3 SPA (dev)
-http://localhost:8000/api/v1/
+### Доступные URL
 
-Swagger UI
-http://localhost:8000/api/v1/docs/
-
-Django Admin
-http://localhost:8000/admin/
+| URL | Описание |
+|-|-|
+| http://localhost:5173 | Vue 3 SPA (dev) |
+| http://localhost:8000/api/v1/docs/ | Swagger UI |
+| http://localhost:8000/admin/ | Django Admin |
 
 ## 📋 Планы развития
 - [x] Визуальный онлайн-статус собеседника

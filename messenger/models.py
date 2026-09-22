@@ -1,28 +1,85 @@
-from django.db import models
-from django.conf import settings
-from django.contrib.auth.models import AbstractUser
 import uuid
+from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.db import models
+
+from config import settings
+
+
+class UserManager(BaseUserManager):
+    """
+    Кастомный менеджер пользователей.
+    Убирает обязательность email для create_user и create_superuser.
+    Телефон используется как основной идентификатор (USERNAME_FIELD).
+    """
+
+    def create_user(self, phone, password=None, **extra_fields):
+        """
+        Создаёт обычного пользователя.
+        phone — обязателен, password — обязателен.
+        Все остальные поля (email, first_name, last_name) — опциональны.
+        """
+        if not phone:
+            raise ValueError('Телефон обязателен')
+
+        # Нормализация телефона: убираем пробелы, скобки, дефисы
+        phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+
+        # email может быть None или пустой строкой — нормализуем
+        email = extra_fields.pop('email', None)
+        if email:
+            email = self.normalize_email(email)
+
+        user = self.model(
+            phone=phone,
+            email=email or '',
+            **extra_fields,
+        )
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, phone, password=None, **extra_fields):
+        """
+        Создаёт суперпользователя.
+        Требует ТОЛЬКО телефон и пароль.
+        Автоматически ставит is_staff=True, is_superuser=True.
+        """
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError('Суперпользователь должен иметь is_staff=True')
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError('Суперпользователь должен иметь is_superuser=True')
+
+        return self.create_user(phone, password, **extra_fields)
 
 
 class User(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    email = models.EmailField(blank=True)
-    phone = models.CharField(max_length=12, unique=True)
+    phone = models.CharField(max_length=20, unique=True, verbose_name='Телефон')
+    email = models.EmailField(blank=True, default='', verbose_name='Email')
+    first_name = models.CharField(max_length=150, blank=True, default='', verbose_name='Имя')
+    last_name = models.CharField(max_length=150, blank=True, default='', verbose_name='Фамилия')
+    last_seen = models.DateTimeField(null=True, blank=True, verbose_name='Последний визит')
 
-    # avatar = models.ImageField(upload_to="avatars/", null=True, blank=True)
-    bio = models.CharField(max_length=255, blank=True)
-    last_seen = models.DateTimeField(null=True, blank=True)
+    # Переопределяем username_field и manager
+    USERNAME_FIELD = 'phone'
+    REQUIRED_FIELDS = []  # ← Пустой! createsuperuser спросит ТОЛЬКО phone + password
 
-    def __str__(self):
-        return self.username
-
-    EMAIL_FIELD = "email"
-    USERNAME_FIELD = "phone"
-    REQUIRED_FIELDS = []
+    objects = UserManager()
 
     class Meta:
-        verbose_name = "Пользователь"
-        verbose_name_plural = "Пользователи"
+        verbose_name = 'Пользователь'
+        verbose_name_plural = 'Пользователи'
+
+    def __str__(self):
+        return self.first_name or self.phone
+
+    @property
+    def full_name(self):
+        name = f'{self.first_name} {self.last_name}'.strip()
+        return name or self.phone
 
 
 class Chat(models.Model):

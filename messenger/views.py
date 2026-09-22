@@ -2,13 +2,13 @@ from uuid import UUID
 
 from django.db.models import Count, Prefetch
 from django.contrib.auth import get_user_model
-from django.views.generic import TemplateView
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import viewsets, permissions, status, generics
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.views import APIView
 
 from .serializers import (
     AddMemberSerializer,
@@ -17,6 +17,7 @@ from .serializers import (
     RegisterResponseSerializer,
     RemoveMemberSerializer,
     UserSerializer,
+    MeSerializer,
 )
 from .models import Chat, Message, Membership
 from .serializers import (
@@ -31,13 +32,6 @@ User = get_user_model()
 
 class IsAuthenticated(permissions.IsAuthenticated):
     pass
-
-
-class ChatClientView(TemplateView):
-    """Dev-only клиент мессенджера. В продакшене заменить на Vue SPA."""
-
-    template_name = "messenger/chat.html"
-    permission_classes = [AllowAny]
 
 
 class ChatViewSet(viewsets.ModelViewSet):
@@ -408,3 +402,20 @@ class UserSearchView(generics.ListAPIView):
             | Q(first_name__icontains=query)
             | Q(last_name__icontains=query)
         ).exclude(id=self.request.user.id)[:20]  # Максимум 20 результатов
+
+
+class MeView(APIView):
+    """
+    GET /auth/me/ — профиль текущего аутентифицированного пользователя.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Текущий пользователь",
+        description="Возвращает профиль аутентифицированного пользователя по JWT-токену.",
+        responses={200: MeSerializer},
+        tags=["auth"],
+    )
+    def get(self, request):
+        serializer = MeSerializer(request.user)
+        return Response(serializer.data)
