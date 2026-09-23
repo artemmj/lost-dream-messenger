@@ -21,9 +21,7 @@ def touch_last_seen(user) -> None:
     User = get_user_model()
     updated = (
         User.objects.filter(pk=user.pk)
-        .filter(
-            Q(last_seen__isnull=True) | Q(last_seen__lt=now - LAST_SEEN_THROTTLE)
-        )
+        .filter(Q(last_seen__isnull=True) | Q(last_seen__lt=now - LAST_SEEN_THROTTLE))
         .update(last_seen=now)
     )
     if updated:

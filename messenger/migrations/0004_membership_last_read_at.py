@@ -5,15 +5,19 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('messenger', '0003_alter_user_managers_remove_user_bio_alter_user_email_and_more'),
+        (
+            "messenger",
+            "0003_alter_user_managers_remove_user_bio_alter_user_email_and_more",
+        ),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='membership',
-            name='last_read_at',
-            field=models.DateTimeField(default=django.utils.timezone.now, verbose_name='Прочитано до'),
+            model_name="membership",
+            name="last_read_at",
+            field=models.DateTimeField(
+                default=django.utils.timezone.now, verbose_name="Прочитано до"
+            ),
         ),
     ]
