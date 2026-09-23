@@ -150,6 +150,8 @@ REST_FRAMEWORK = {
         "read": "120/min",
         "write": "30/min",
         "search": "20/min",
+        # PATCH /users/me/: уникальные поля, ошибка валидации = enumeration
+        "profile": "20/min",
         "schema": "30/hour",
     },
     # Один прокси (nginx): без этого DRF берёт весь X-Forwarded-For целиком,
@@ -167,7 +169,7 @@ SIMPLE_JWT = {
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Messenger API",
-    "DESCRIPTION": "API простого мессенджера на Django + DRF",
+    "DESCRIPTION": "API мессенджера на Django + DRF",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,  # Не показывать эндпоинт /api/schema/ в самом Swagger UI
     "COMPONENT_SPLIT_REQUEST": True,  # Разделять read/write сериалайзеры в документации

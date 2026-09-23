@@ -17,6 +17,16 @@ const showMembers = ref(false)
 const closedNotice = ref('')
 // Сервер отклонил событие, сокет при этом жив (пустой текст, анти-флуд)
 const sendError = ref('')
+// Удаление чата: первый клик — взвести, второй — удалить. Текст в строке под шапкой
+const confirmDelete = ref(false)
+const isDeleting = ref(false)
+const deleteError = ref('')
+// Переименование GROUP-чата: инлайн-редактор прямо в заголовке
+const nameInput = ref<HTMLInputElement>()
+const isRenaming = ref(false)
+const nameDraft = ref('')
+const isSavingName = ref(false)
+const renameError = ref('')
 
 const CLOSE_NOTICES: Record<number, string> = {
   4003: 'Вы удалены из этого чата',
@@ -80,6 +90,10 @@ let lastScrollTop = 0
 watch(() => chatStore.selectedChatId, () => {
   closedNotice.value = ''
   sendError.value = ''
+  confirmDelete.value = false
+  deleteError.value = ''
+  isRenaming.value = false
+  renameError.value = ''
   isChatSwitch = true
   lastScrollTop = 0
 })
@@ -145,6 +159,70 @@ const currentChatName = computed(() => {
 
 const isGroup = computed(() => selectedChat.value?.type === 'GROUP')
 
+// GROUP удаляет только админ (сервер вернёт 403 остальным), PRIVATE — любой участник,
+// поэтому для личного чата прав проверять нечего: мы в нём уже состоим.
+const canDeleteChat = computed(() => {
+  const chat = selectedChat.value
+  if (!chat) return false
+  return chat.type === 'PRIVATE' || !!chatStore.currentChatDetails?.my_is_admin
+})
+
+// Одна строка под шапкой: ошибки удаления/переименования или текст подтверждения
+const headerNotice = computed(() =>
+  deleteError.value ||
+  renameError.value ||
+  (confirmDelete.value
+    ? 'Чат будет удалён вместе с историей, восстановить нельзя. Нажмите ещё раз для подтверждения.'
+    : ''),
+)
+
+// GROUP-чат переименовывает только админ — тот же флаг, что у кнопки удаления
+const canRenameChat = computed(
+  () => isGroup.value && !!chatStore.currentChatDetails?.my_is_admin,
+)
+
+async function startRename() {
+  nameDraft.value = selectedChat.value?.name || ''
+  renameError.value = ''
+  isRenaming.value = true
+  await nextTick()
+  nameInput.value?.focus()
+  nameInput.value?.select()
+}
+
+function cancelRename() {
+  isRenaming.value = false
+  renameError.value = ''
+}
+
+async function saveRename() {
+  const chatId = chatStore.selectedChatId
+  if (!chatId || isSavingName.value) return
+  const name = nameDraft.value.trim()
+  if (!name) {
+    renameError.value = 'Название не может быть пустым'
+    return
+  }
+  if (name === selectedChat.value?.name) {
+    cancelRename()
+    return
+  }
+  isSavingName.value = true
+  try {
+    await chatStore.renameChat(chatId, name)
+    isRenaming.value = false
+    renameError.value = ''
+  } catch (e: any) {
+    const d = e.response?.data
+    // 400 — не GROUP или пустое название, 403 — не админ, 429 — scope `write`
+    renameError.value =
+      (typeof d === 'string' ? d : d?.name?.[0] || d?.detail) ||
+      'Не удалось переименовать чат'
+  } finally {
+    isSavingName.value = false
+  }
+}
+
 /** Онлайн-статус собеседника (только для личных чатов) */
 const interlocutorOnline = computed(() => {
   const chat = selectedChat.value
@@ -171,6 +249,29 @@ async function handleSend() {
     }
   }
 }
+
+async function handleDeleteChat() {
+  const chatId = chatStore.selectedChatId
+  if (!chatId || isDeleting.value) return
+  if (!confirmDelete.value) {
+    confirmDelete.value = true
+    return
+  }
+  isDeleting.value = true
+  deleteError.value = ''
+  try {
+    await chatStore.deleteChat(chatId)
+    confirmDelete.value = false
+  } catch (e: any) {
+    const d = e.response?.data
+    // Сюда же прилетает 403 (не админ) и 429 от scope `write`
+    deleteError.value =
+      (typeof d === 'string' ? d : d?.detail) || 'Не удалось удалить чат'
+    confirmDelete.value = false
+  } finally {
+    isDeleting.value = false
+  }
+}
 </script>
 
 <template>
@@ -178,7 +279,26 @@ async function handleSend() {
     <template v-if="chatStore.selectedChatId">
       <div class="chat-header">
         <div class="chat-header-info">
-          <div class="chat-header-name">{{ currentChatName }}</div>
+          <input
+            v-if="isRenaming"
+            ref="nameInput"
+            v-model="nameDraft"
+            class="chat-rename-input"
+            maxlength="255"
+            title="Enter — сохранить, Esc — отмена"
+            :disabled="isSavingName"
+            @keydown.esc.stop="cancelRename"
+            @keydown.enter.stop="saveRename"
+          />
+          <button
+            v-else-if="canRenameChat"
+            class="chat-header-name chat-title-btn"
+            title="Переименовать чат"
+            @click="startRename"
+          >
+            {{ currentChatName }}
+          </button>
+          <div v-else class="chat-header-name">{{ currentChatName }}</div>
           <div v-if="interlocutorOnline !== null" class="presence-label">
             <span
               class="ws-dot"
@@ -190,12 +310,24 @@ async function handleSend() {
         <button v-if="isGroup" class="members-btn" @click="showMembers = true">
           Участники{{ chatStore.currentChatDetails ? ` (${chatStore.currentChatDetails.members.length})` : '' }}
         </button>
+        <button
+          v-if="canDeleteChat"
+          class="chat-delete-btn"
+          :class="{ armed: confirmDelete }"
+          :disabled="isDeleting"
+          title="Удалить чат вместе с историей"
+          @click="handleDeleteChat"
+        >
+          {{ isDeleting ? 'Удаление...' : 'Удалить чат' }}
+        </button>
         <button class="chat-close-btn" title="Закрыть чат (Esc)" @click="chatStore.closeChat()">
           ×
         </button>
       </div>
       <!-- При WS-лимитах чат остаётся выбранным — плашка показывается внутри окна -->
       <div v-if="closedNotice" class="connection-notice">{{ closedNotice }}</div>
+      <!-- Подтверждение удаления и ошибки записи — под шапкой, рядом с чатом -->
+      <div v-if="headerNotice" class="header-notice">{{ headerNotice }}</div>
       <div ref="messagesContainer" class="messages-container" @scroll="handleScroll">
         <div v-if="chatStore.isLoadingHistory" class="history-loading">Загрузка истории...</div>
         <MessageBubble

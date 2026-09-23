@@ -24,10 +24,12 @@ from .serializers import (
     ChatCreateSerializer,
     ChatDetailSerializer,
     ChatListSerializer,
+    ChatRenameSerializer,
     MeSerializer,
     MessageCreateSerializer,
     MessageSerializer,
     PrivateChatCreateSerializer,
+    ProfileUpdateSerializer,
     RegisterResponseSerializer,
     RegisterSerializer,
     RemoveMemberSerializer,
@@ -48,13 +50,16 @@ class ChatViewSet(viewsets.ModelViewSet):
     - list: Список чатов текущего пользователя с последним сообщением
     - retrieve: Детальная информация о чате со списком участников
     - create: Создание нового чата (создатель автоматически становится админом)
+    - partial_update: Переименование GROUP-чата (только админ)
     - destroy: Удаление чата (GROUP — только админ, PRIVATE — любой участник)
     - messages: История сообщений чата с пагинацией
     - send_message: Отправка текстового сообщения в чат
     """
 
     permission_classes = [IsAuthenticated]
-    http_method_names = ["get", "post", "delete"]
+    # PUT нет сознательно: PATCH /chats/{id}/ меняет только название GROUP-чата,
+    # полноценного обновления чата в приложении нет
+    http_method_names = ["get", "post", "patch", "delete"]
 
     # Лимиты на запись строже, чем на чтение; list/retrieve остаются только на
     # глобальном user-троттле (scope None → ScopedRateThrottle пропускает запрос).
@@ -65,6 +70,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         "add_member": "write",
         "remove_member": "write",
         "destroy": "write",
+        "partial_update": "write",
         "mark_read": "read",
     }
 
@@ -141,6 +147,55 @@ class ChatViewSet(viewsets.ModelViewSet):
                 )
 
     @extend_schema(
+        summary="Переименовать групповой чат",
+        description=(
+            "PATCH /chats/{id}/ меняет только название и только у GROUP-чата; "
+            "права — администратор чата. Личный чат называется по имени собеседника, "
+            "поэтому для него возвращается 400. Остальные участники получают "
+            "chat_renamed в личный WebSocket-канал."
+        ),
+        request=ChatRenameSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=ChatDetailSerializer, description="Чат с новым названием"
+            ),
+            400: OpenApiResponse(description="Чат не групповой или название пустое"),
+            403: OpenApiResponse(
+                description="Недостаточно прав (требуется роль администратора)"
+            ),
+        },
+    )
+    def partial_update(self, request, *args, **kwargs):
+        # get_object() ограничен queryset'ом «чаты пользователя» — не участник получит 404
+        chat = self.get_object()
+
+        if chat.type != Chat.ChatType.GROUP:
+            return Response(
+                {"detail": "Переименовать можно только групповой чат."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ok, error = self._check_membership(chat, request.user, require_admin=True)
+        if not ok:
+            return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ChatRenameSerializer(chat, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        name = serializer.validated_data.get("name")
+        # Пустой PATCH или то же название: ничего не пишем и не рассылаем
+        if not name or name == chat.name:
+            return Response(
+                ChatDetailSerializer(chat, context={"request": request}).data
+            )
+
+        serializer.save()
+        publish_to_users(
+            list(chat.members.values_list("id", flat=True)),
+            {"type": "chat.renamed", "chat_id": str(chat.id), "name": name},
+        )
+        return Response(ChatDetailSerializer(chat, context={"request": request}).data)
+
+    @extend_schema(
         summary="Удалить чат",
         description=(
             "Удаляет чат вместе со всеми сообщениями. GROUP-чат может удалить только "
@@ -154,7 +209,6 @@ class ChatViewSet(viewsets.ModelViewSet):
                 description="Чат не найден или вы не являетесь участником"
             ),
         },
-        tags=["Chats"],
     )
     def destroy(self, request, *args, **kwargs):
         chat = self.get_object()
@@ -208,7 +262,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             ),
             404: OpenApiResponse(description="Чат не найден"),
         },
-        tags=["Messages"],
     )
     @action(detail=True, methods=["get"])
     def messages(self, request, pk: UUID = None):
@@ -249,7 +302,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             ),
             404: OpenApiResponse(description="Чат не найден"),
         },
-        tags=["Messages"],
     )
     @action(detail=True, methods=["post"], url_path="send")
     def send_message(self, request, pk: UUID = None):
@@ -294,7 +346,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             200: OpenApiResponse(description="Курсор обновлён"),
             404: OpenApiResponse(description="Чат не найден или вы не участник"),
         },
-        tags=["Chats"],
     )
     @action(detail=True, methods=["post"], url_path="read")
     def mark_read(self, request, pk: UUID = None):
@@ -324,7 +375,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             ),
             404: OpenApiResponse(description="Чат не найден"),
         },
-        tags=["Members"],
     )
     @action(detail=True, methods=["post"], url_path="add-member")
     def add_member(self, request, pk: UUID = None):
@@ -371,7 +421,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             403: OpenApiResponse(description="Нет прав"),
             404: OpenApiResponse(description="Чат или участник не найдены"),
         },
-        tags=["Members"],
     )
     @action(detail=True, methods=["post"], url_path="remove-member")
     def remove_member(self, request, pk: UUID = None):
@@ -439,7 +488,6 @@ class ChatViewSet(viewsets.ModelViewSet):
             201: ChatDetailSerializer,
             400: OpenApiResponse(description="Ошибка валидации"),
         },
-        tags=["Chats"],
     )
     @action(detail=False, methods=["post"], url_path="private")
     def create_private(self, request):
@@ -563,7 +611,6 @@ class UserSearchView(generics.ListAPIView):
                 description="Поиск по телефону или имени",
             ),
         ],
-        tags=["Users"],
     )
     def get_queryset(self):
         query = self.request.query_params.get("q", "").strip()
@@ -581,17 +628,41 @@ class UserSearchView(generics.ListAPIView):
 
 class MeView(APIView):
     """
-    GET /auth/me/ — профиль текущего аутентифицированного пользователя.
+    GET   /users/me/ — профиль текущего аутентифицированного пользователя.
+    PATCH /users/me/ — редактирование своего профиля, ответ — профиль целиком.
     """
 
     permission_classes = [IsAuthenticated]
+
+    def get_throttles(self):
+        # Точечный лимит только на запись: PATCH принимает уникальные поля, а текст
+        # ошибки валидации отвечает «занято ли» — то есть это вектор enumeration.
+        # GET делается один раз на загрузку приложения, ему хватает глобального user.
+        self.throttle_scope = "profile" if self.request.method == "PATCH" else None
+        return super().get_throttles()
 
     @extend_schema(
         summary="Текущий пользователь",
         description="Возвращает профиль аутентифицированного пользователя по JWT-токену.",
         responses={200: MeSerializer},
-        tags=["auth"],
     )
     def get(self, request):
         serializer = MeSerializer(request.user)
         return Response(serializer.data)
+
+    @extend_schema(
+        summary="Обновление своего профиля",
+        description=(
+            "Частичное обновление: phone, email, first_name, last_name. Непереданные "
+            "поля остаются как есть. Ответ — профиль в формате GET /users/me/."
+        ),
+        request=ProfileUpdateSerializer,
+        responses={200: MeSerializer},
+    )
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(
+            request.user, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(MeSerializer(user).data)

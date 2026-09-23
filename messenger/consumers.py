@@ -332,6 +332,16 @@ class NotificationConsumer(AsyncJsonWebsocketConsumer):
     async def chat_deleted(self, event):
         await self.send_json({"type": "chat_deleted", "chat": event["chat_id"]})
 
+    async def chat_renamed(self, event):
+        """Название изменили — обновляем заголовок, даже когда сокет чата закрыт."""
+        await self.send_json(
+            {
+                "type": "chat_renamed",
+                "chat": event["chat_id"],
+                "name": event["name"],
+            }
+        )
+
     async def member_removed(self, event):
         await self.send_json({"type": "member_removed", "chat": event["chat_id"]})
 

@@ -95,6 +95,64 @@ class MeSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """
+    Обновление своего профиля (PATCH /users/me/).
+
+    Все поля опциональны — непереданные остаются как есть. `id` и `last_seen`
+    сюда не входят намеренно: их меняет сервер.
+    """
+
+    # Объявляем явно: ModelSerializer не подставил бы max_length к переопределённому полю
+    phone = serializers.CharField(required=False, max_length=20)
+    email = serializers.EmailField(required=False, allow_blank=True)
+
+    class Meta:
+        model = User
+        fields = ("phone", "email", "first_name", "last_name")
+
+    def validate_phone(self, value: str) -> str:
+        # Та же нормализация, что в UserManager.create_user: логин ищется по
+        # «чистому» телефону, поэтому запись с пробелами/скобками выбила бы
+        # пользователя из входа.
+        normalized = "".join(c for c in value if c.isdigit() or c == "+")
+        if not normalized:
+            raise serializers.ValidationError("Телефон не может быть пустым.")
+        if self._others_exist(phone=normalized):
+            raise serializers.ValidationError("Этот телефон уже занят.")
+        return normalized
+
+    def validate_email(self, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized and self._others_exist(email__iexact=normalized):
+            raise serializers.ValidationError(
+                "Пользователь с таким email уже существует."
+            )
+        return normalized
+
+    def _others_exist(self, **lookup) -> bool:
+        # Не перебиваем себя: PATCH с прежним телефоном/email — не конфликт
+        qs = User.objects.filter(**lookup)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        return qs.exists()
+
+    def validate_first_name(self, value: str) -> str:
+        return value.strip()
+
+    def validate_last_name(self, value: str) -> str:
+        return value.strip()
+
+    def update(self, instance, validated_data):
+        phone = validated_data.get("phone")
+        # Регистрация копирует телефон в username (он unique — см. RegisterSerializer).
+        # Если при смене телефона оставить старое значение, новый владелец этого номера
+        # упрётся при регистрации в IntegrityError на unique username.
+        if phone and instance.username == instance.phone:
+            validated_data["username"] = phone
+        return super().update(instance, validated_data)
+
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -234,6 +292,23 @@ class ChatCreateSerializer(serializers.ModelSerializer):
                     "Один или несколько пользователей не найдены."
                 )
         return list(set(value))
+
+
+class ChatRenameSerializer(serializers.ModelSerializer):
+    """
+    Переименование GROUP-чата: только название, остальные поля недоступны.
+    Права (админ чата) и тип чата проверяются во вьюхе — здесь только валидация.
+    """
+
+    class Meta:
+        model = Chat
+        fields = ("name",)
+
+    def validate_name(self, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Название чата не может быть пустым.")
+        return name
 
 
 class MessageCreateSerializer(serializers.Serializer):

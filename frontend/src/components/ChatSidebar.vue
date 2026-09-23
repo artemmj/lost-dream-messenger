@@ -4,11 +4,13 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import NewChatModal from './NewChatModal.vue'
+import ProfileModal from './ProfileModal.vue'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
 const router = useRouter()
 const showModal = ref(false)
+const showProfileModal = ref(false)
 
 /**
  * Отображаемое имя пользователя.
@@ -60,7 +62,10 @@ const formatUnread = (n: number) => (n > 99 ? '99+' : String(n))
           {{ wsStatusLabel }}
         </span>
       </div>
-      <button class="logout-btn" @click="handleLogout">Выйти</button>
+      <div class="sidebar-actions">
+        <button class="profile-btn" @click="showProfileModal = true">Профиль</button>
+        <button class="logout-btn" @click="handleLogout">Выйти</button>
+      </div>
     </div>
     <div class="chat-list">
       <div
@@ -80,5 +85,6 @@ const formatUnread = (n: number) => (n > 99 ? '99+' : String(n))
     </div>
     <button class="new-chat-btn" @click="showModal = true">+ Новый чат</button>
     <NewChatModal :is-open="showModal" @close="showModal = false" />
+    <ProfileModal :is-open="showProfileModal" @close="showProfileModal = false" />
   </div>
 </template>

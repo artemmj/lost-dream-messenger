@@ -15,6 +15,7 @@ useNotificationsSocket(() => localStorage.getItem('access_token'), {
     chatStore.applyNewMessage(message, unreadCount),
   onChatRead: (chatId) => chatStore.setUnread(chatId, 0),
   onChatDeleted: (chatId) => chatStore.removeChat(chatId),
+  onChatRenamed: (chatId, name) => chatStore.applyRename(chatId, name),
   onMemberRemoved: (chatId) => chatStore.removeChat(chatId),
 })
 

@@ -221,6 +221,40 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * Новое название чата — из ответа PATCH или из личного канала (`chat_renamed`).
+   * Заголовок открытого чата берётся из элемента списка, поэтому его обновляем
+   * сразу; детали перечитывать нечем — там название тоже есть, но оно не влияет
+   * на права.
+   */
+  function applyRename(chatId: string, name: string) {
+    const chat = chats.value.find((c) => c.id === chatId)
+    if (!chat) {
+      // Чата в списке нет — он мог прийти, пока мы его не видели: перечитаем
+      loadChats()
+      return
+    }
+    chat.name = name
+    if (currentChatDetails.value?.id === chatId) currentChatDetails.value.name = name
+  }
+
+  /** Переименование GROUP-чата (только админ — иначе 403). Ошибку не глотаем. */
+  async function renameChat(chatId: string, name: string) {
+    const { data } = await api.patch(`/chats/${chatId}/`, { name })
+    applyRename(chatId, data?.name ?? name)
+  }
+
+  /**
+   * Удаление чата вместе с сообщениями. GROUP — только админ (иначе 403),
+   * PRIVATE — любой участник. Ошибку не глотаем: текст detail нужен кнопке.
+   * Сервер сам разнесёт chat.deleted участникам, но список обновляем сразу,
+   * не дожидаясь WS.
+   */
+  async function deleteChat(chatId: string) {
+    await api.delete(`/chats/${chatId}/`)
+    removeChat(chatId)
+  }
+
   function setUserStatus(userId: string, status: string) {
     if (status === 'online') onlineUsers.value.add(userId)
     else onlineUsers.value.delete(userId)
@@ -267,6 +301,9 @@ export const useChatStore = defineStore('chat', () => {
     addMessage,
     markAllRead,
     removeChat,
+    applyRename,
+    renameChat,
+    deleteChat,
     setUserStatus,
     setInitialPresence,
     setWsStatus,

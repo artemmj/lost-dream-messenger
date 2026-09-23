@@ -7,6 +7,7 @@ export interface NotificationEvents {
   onNewMessage: (message: Message, unreadCount: number) => void
   onChatRead: (chatId: string) => void
   onChatDeleted: (chatId: string) => void
+  onChatRenamed: (chatId: string, name: string) => void
   onMemberRemoved: (chatId: string) => void
 }
 
@@ -45,6 +46,9 @@ export function useNotificationsSocket(
             break
           case 'chat_deleted':
             events.onChatDeleted(data.chat)
+            break
+          case 'chat_renamed':
+            events.onChatRenamed(data.chat, data.name)
             break
           case 'member_removed':
             events.onMemberRemoved(data.chat)

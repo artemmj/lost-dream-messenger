@@ -4,8 +4,23 @@ import { ref, computed } from 'vue'
 import { fetchMe } from '../services/api'
 import api from '../services/api'
 
+/** Формат ответа /users/me/ — телефон обязателен, остальное может быть не заполнено */
+export interface UserProfile {
+  id: string
+  phone: string
+  email?: string
+  first_name?: string
+  last_name?: string
+  last_seen?: string | null
+}
+
+/** Обновляемые поля профиля (PATCH /users/me/) */
+export type ProfileUpdatePayload = Partial<
+  Pick<UserProfile, 'phone' | 'email' | 'first_name' | 'last_name'>
+>
+
 /** Декодируем JWT payload без запроса к API */
-function getUserFromToken() {
+function getUserFromToken(): UserProfile | null {
   try {
     const token = localStorage.getItem('access_token')
     if (!token) return null
@@ -31,7 +46,7 @@ function getUserFromToken() {
 
 export const useAuthStore = defineStore('auth', () => {
   // State — восстанавливаем из токена при перезагрузке
-  const user = ref(getUserFromToken())
+  const user = ref<UserProfile | null>(getUserFromToken())
   const isLoading = ref(false)
   const error = ref('')
 
@@ -45,7 +60,7 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('access_token', data.access)
       localStorage.setItem('refresh_token', data.refresh)
 
-      // Загружаем полный профиль через /auth/me/
+      // Загружаем полный профиль через /users/me/
       try {
         const { data: profile } = await fetchMe()
         user.value = profile
@@ -77,7 +92,7 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('access_token', data.access)
       localStorage.setItem('refresh_token', data.refresh)
 
-      // Загружаем профиль через /auth/me/ вместо использования data.user
+      // Загружаем профиль через /users/me/ вместо использования data.user
       try {
         const { data: profile } = await fetchMe()
         user.value = profile
@@ -92,6 +107,28 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  async function updateProfile(payload: ProfileUpdatePayload): Promise<boolean> {
+    isLoading.value = true
+    error.value = ''
+    try {
+      const { data } = await api.patch('/users/me/', payload)
+      // Ответ — профиль целиком, в том же формате, что /users/me/
+      user.value = data
+      return true
+    } catch (e: any) {
+      const d = e.response?.data
+      const fieldErrors: any[] = d && typeof d === 'object' ? Object.values(d) : []
+      // DRF отвечает по полям ({phone: ['...']}); detail — у 429 и не-валидационных отказов
+      error.value =
+        (typeof d === 'string' ? d : d?.detail) ||
+        fieldErrors.map((v) => (Array.isArray(v) ? v[0] : v)).filter(Boolean)[0] ||
+        'Не удалось сохранить профиль'
+      return false
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   function logout() {
     localStorage.removeItem('access_token')
     localStorage.removeItem('refresh_token')
@@ -100,5 +137,15 @@ export const useAuthStore = defineStore('auth', () => {
 
   function clearError() { error.value = '' }
 
-  return { user, isLoading, error, isAuthenticated, login, register, logout, clearError }
+  return {
+    user,
+    isLoading,
+    error,
+    isAuthenticated,
+    login,
+    register,
+    updateProfile,
+    logout,
+    clearError,
+  }
 })
