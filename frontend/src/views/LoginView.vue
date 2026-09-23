@@ -17,8 +17,15 @@ watch(isRegister, () => {
 })
 
 async function handleSubmit() {
-  if (isRegister.value) await auth.register(form)
-  else await auth.login(form.phone, form.password)
+  if (isRegister.value) {
+    // Пустые необязательные поля не отправляем: бэкенд трактует "" как невалидный email
+    const payload = Object.fromEntries(
+      Object.entries(form).filter(([, v]) => v.trim()),
+    )
+    await auth.register(payload)
+  } else {
+    await auth.login(form.phone, form.password)
+  }
 
   if (auth.isAuthenticated) {
     router.push('/')
@@ -34,9 +41,9 @@ async function handleSubmit() {
       <form @submit.prevent="handleSubmit">
         <input v-model="form.phone" class="form-input" placeholder="Телефон (+79991234567)" required />
         <template v-if="isRegister">
-          <input v-model="form.email" class="form-input" placeholder="Email" type="email" required />
-          <input v-model="form.first_name" class="form-input" placeholder="Имя" required />
-          <input v-model="form.last_name" class="form-input" placeholder="Фамилия" required />
+          <input v-model="form.email" class="form-input" placeholder="Email (необязательно)" type="email" />
+          <input v-model="form.first_name" class="form-input" placeholder="Имя (необязательно)" />
+          <input v-model="form.last_name" class="form-input" placeholder="Фамилия (необязательно)" />
         </template>
         <input v-model="form.password" class="form-input" type="password" placeholder="Пароль" required />
         <input v-if="isRegister" v-model="form.password_confirm" class="form-input" type="password" placeholder="Подтвердите пароль" required />

@@ -11,7 +11,7 @@ User = get_user_model()
 class RegisterSerializer(serializers.ModelSerializer):
     phone = serializers.CharField(required=True)
     email = serializers.EmailField(required=False)
-    username = serializers.CharField(required=False)
+    username = serializers.CharField(required=False, allow_blank=True)
     password = serializers.CharField(
         write_only=True,
         # min_length=8,
@@ -49,13 +49,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         return normalized
 
     def validate_username(self, value: str) -> str:
-        if value:
-            if User.objects.filter(username__iexact=value).exists():
-                raise serializers.ValidationError(
-                    "Пользователь с таким именем уже существует."
-                )
-            return value.strip()
-        return
+        value = value.strip()
+        if value and User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError(
+                "Пользователь с таким именем уже существует."
+            )
+        return value
 
     def validate(self, attrs: dict) -> dict:
         if attrs["password"] != attrs.pop("password_confirm"):
@@ -67,7 +66,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data: dict) -> User:
-        username = validated_data.get("username", validated_data["phone"])
+        username = validated_data.get("username") or validated_data["phone"]
         user = User.objects.create_user(
             phone=validated_data["phone"],
             password=validated_data["password"],

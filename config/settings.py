@@ -10,7 +10,6 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
     "0.0.0.0",
     "backend",  # Docker internal DNS
-    "localhost:5173",  # ← Vite dev server origin
 ]
 
 INSTALLED_APPS = [

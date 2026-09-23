@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import NewChatModal from './NewChatModal.vue'
-// import api from '../services/api'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -23,24 +22,6 @@ const displayName = computed(() => {
   if (u.phone && u.phone.trim()) return u.phone
   return 'Пользователь'
 })
-
-/**
- * При монтировании загружаем полный профиль если есть только базовые данные.
- * Это нужно после перезагрузки страницы когда user восстановлен из JWT.
- */
-// onMounted(async () => {
-//   if (auth.user && !auth.user.first_name && auth.user.phone) {
-//     try {
-//       const { data } = await api.get('/users/search/', { params: { q: auth.user.phone } })
-//       const userList = Array.isArray(data) ? data : data.results || []
-//       if (userList.length > 0) {
-//         auth.user = userList[0]
-//       }
-//     } catch {
-//       // Тихо игнорируем, displayName покажет phone
-//     }
-//   }
-// })
 
 const wsStatusColor = computed(() => ({
   connected: '#4caf50', connecting: '#ff9800', disconnected: '#e74c3c', error: '#e74c3c',

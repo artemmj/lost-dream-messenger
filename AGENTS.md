@@ -34,7 +34,6 @@ lost-dream-messenger/
     ├── src/
     │   ├── assets/styles.css      # Глобальные стили (CSS variables)
     │   ├── components/            # ChatSidebar, ChatWindow, MessageBubble, NewChatModal, GroupMembersModal
-    │   │   └── (TheWelcome, WelcomeItem, icons/ — мёртвый код шаблона create-vue)
     │   ├── composables/           # useChatSocket — WS-подключение, reconnect, отправка
     │   ├── stores/                # Pinia: auth.ts (JWT, профиль), chat.ts (чаты, сообщения)
     │   ├── services/api.ts        # Axios instance + interceptors (Bearer, авто-refresh при 401)
@@ -53,7 +52,7 @@ lost-dream-messenger/
 | Решение | Обоснование |
 |---------|-------------|
 | UUID PK во всех моделях | Безопасность (нет enumeration), совместимость с distributed |
-| `phone` как USERNAME_FIELD | Мессенджер-ориентированная идентификация; поле `username` из AbstractUser сохранено (у суперпользователя может быть пустой строкой) |
+| `phone` как USERNAME_FIELD | Мессенджер-ориентированная идентификация; поле `username` из AbstractUser сохранено (у суперпользователя может быть пустой строкой, при регистрации через API в пустой `username` подставляется `phone`) |
 | `/auth/me/` для профиля | JWT payload содержит только `user_id` — профиль всегда догружается отдельным запросом |
 | Промежуточная модель Membership | Расширяемость (роли, mute, ban); `is_admin` управляет add/remove member |
 | Daphne вместо Gunicorn | Единый ASGI-сервер для HTTP + WebSocket |
@@ -141,6 +140,7 @@ lost-dream-messenger/
 - **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
 - **GroupMembersModal.vue**: список участников (бейджи «админ»/«вы»); админ — debounced-поиск и добавление (`POST add-member/`), удаление любого (`POST remove-member/`); любой участник — «Выйти» (выход из чата, при опустевшем чате сервер его удаляет).
 - **NewChatModal.vue**: режимы «Личный / Групповой». Личный: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка + **автовыбор** чата. Групповой: название + мультивыбор пользователей из поиска (chips) → `POST /chats/ {type, name, member_ids}` → автовыбор.
+- **LoginView.vue**: вход и регистрация в одной форме. Email/имя/фамилия необязательны — пустые значения вырезаются из payload перед `POST /auth/register/` (бэкенд трактует `""` как невалидный email).
 - Роуты: `/login`, `/` (requiresAuth), catch-all → `/login`.
 
 ## 🐳 Инфраструктура
@@ -148,6 +148,7 @@ lost-dream-messenger/
 - **docker-compose.yml**: сервисы `db` (postgres:18, порт на хосте **5434**, healthcheck), `redis` (7-alpine, healthcheck, порт 6379), `backend` (build из корневого Dockerfile; команда: migrate → collectstatic → daphne; bind-mount `.:/app`; volume `media_data`), `frontend` (target `dev`, bind-mount исходников для HMR). **Сервис называется `backend`, не `web`.**
 - **Dockerfile (backend)**: python:3.13-slim, multi-stage (pip `--prefix=/install`), непривилегированный `appuser`.
 - **Dockerfile (frontend)**: node:22-alpine, `npm ci`; target `dev` — Vite с `--host 0.0.0.0`; target `prod` — билд + nginx с `nginx.conf` (upstream `backend:8000`).
+- **`.dockerignore`** (корневой, для образа backend): исключает `.git`, `.env*`, `.venv/`, кэши (`.ruff_cache/`, `.pytest_cache/`, `.mypy_cache/`), `frontend/` (у фронтенда собственный build-контекст `./frontend`), `node_modules/`, `media/`, `staticfiles/`.
 - Статика: WhiteNoise (`CompressedManifestStaticFilesStorage`), `collectstatic` выполняется в команде compose.
 - Swagger UI + drf-spectacular с JWT security scheme и persistAuthorization.
 
@@ -211,10 +212,6 @@ docker compose down -v && docker compose up --build -d
 7. **`last_seen` обновляется только при WS connect/disconnect** — не отражает реальную активность.
 8. **Нет soft-delete** — удаление чата/сообщения физическое.
 9. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
-10. **`.dockerignore` не исключает `.venv/` и `.ruff_cache/`** — попадают в build-контекст и образ (`COPY . .`), также в образ копируется `frontend/`.
-11. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
-12. **Мёртвый код фронтенда**: TheWelcome.vue, WelcomeItem.vue, icons/, шаблонный CSS в App.vue, закомментированный блок в ChatSidebar.vue, дефолтный frontend/README.md, title «Vite App» в index.html.
-13. **`MAILERS` в settings.py** — несуществующая настройка Django (мертвый код); `ALLOWED_HOSTS` содержит некорректный `'localhost:5173'` (host без порта).
-14. **`RegisterSerializer.validate_username`** возвращает `None` для пустой строки → потенциальный IntegrityError при регистрации с `username: ""` через API (фронт это поле не отправляет).
-15. **Форма регистрации на фронте** делает email/first_name/last_name обязательными, хотя бэкенд их не требует.
-16. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
+10. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
+11. **`MAILERS` в settings.py** — несуществующая настройка Django (мертвый код).
+12. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
