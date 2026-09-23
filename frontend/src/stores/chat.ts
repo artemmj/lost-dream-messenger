@@ -193,7 +193,12 @@ export const useChatStore = defineStore('chat', () => {
     wsStatus.value = status
   }
 
-  function resetMessages() {
+  /**
+   * Закрыть текущий чат: снимает выделение и выгружает окно, но не трогает список
+   * (в отличие от removeChat — там чат перестал существовать для нас).
+   * WS закрывается сам: useChatSocket следит за selectedChatId.
+   */
+  function closeChat() {
     messages.value = []
     selectedChatId.value = null
     currentChatDetails.value = null
@@ -221,6 +226,6 @@ export const useChatStore = defineStore('chat', () => {
     setUserStatus,
     setInitialPresence,
     setWsStatus,
-    resetMessages,
+    closeChat,
   }
 })

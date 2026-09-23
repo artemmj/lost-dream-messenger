@@ -151,6 +151,14 @@ body {
 }
 .members-btn:hover { background: #f5f7fa; border-color: var(--color-primary); }
 
+/* Крестик в шапке чата: закрыть (снять выделение), не удалить */
+.chat-close-btn {
+  background: none; border: none; cursor: pointer; align-self: center;
+  font-size: 1.5rem; line-height: 1; padding: 0 .2rem; margin-right: -.3rem;
+  color: var(--color-text-muted);
+}
+.chat-close-btn:hover { color: var(--color-danger); }
+
 .ws-indicator {
   font-size: .7rem; font-weight: 400; color: var(--color-text-muted);
   display: flex; align-items: center; gap: .25rem;

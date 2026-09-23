@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, computed } from 'vue'
+import { onKeyStroke } from '@vueuse/core'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useChatSocket } from '../composables/useChatSocket'
@@ -62,6 +63,13 @@ const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
 
 // Индикатор соединения живёт в сайдбаре — пробрасываем статус в store
 watch(wsStatus, (s) => chatStore.setWsStatus(s), { immediate: true })
+
+// Esc закрывает верхний слой: открытая модалка перехватывает Esc сама, а чат трогать
+// не надо. Состояние модалок живёт в соседних компонентах, поэтому смотрим на оверлей.
+onKeyStroke('Escape', () => {
+  if (document.querySelector('.modal-overlay')) return
+  chatStore.closeChat()
+})
 
 // true = только что открыли чат: первая прокрутка мгновенная (без анимации),
 // иначе smooth-анимация с scrollTop=0 сама провоцирует догрузку истории
@@ -181,6 +189,9 @@ async function handleSend() {
         </div>
         <button v-if="isGroup" class="members-btn" @click="showMembers = true">
           Участники{{ chatStore.currentChatDetails ? ` (${chatStore.currentChatDetails.members.length})` : '' }}
+        </button>
+        <button class="chat-close-btn" title="Закрыть чат (Esc)" @click="chatStore.closeChat()">
+          ×
         </button>
       </div>
       <!-- При WS-лимитах чат остаётся выбранным — плашка показывается внутри окна -->

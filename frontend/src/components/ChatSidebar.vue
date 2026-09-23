@@ -32,7 +32,7 @@ const wsStatusLabel = computed(() => ({
 }[chatStore.wsStatus]))
 
 function handleLogout() {
-  chatStore.resetMessages()
+  chatStore.closeChat()
   auth.logout()
   router.push('/login')
 }

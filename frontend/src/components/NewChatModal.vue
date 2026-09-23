@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { useDebounceFn } from '@vueuse/core'
+import { useDebounceFn, onKeyStroke } from '@vueuse/core'
 import api from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
@@ -47,6 +47,11 @@ function reset() {
 // Очистка при закрытии
 watch(() => props.isOpen, (open) => {
   if (!open) reset()
+})
+
+// Esc закрывает модалку: чат под ней остаётся открытым
+onKeyStroke('Escape', () => {
+  if (props.isOpen) emit('close')
 })
 
 watch(mode, () => {

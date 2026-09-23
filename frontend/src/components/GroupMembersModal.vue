@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useDebounceFn } from '@vueuse/core'
+import { useDebounceFn, onKeyStroke } from '@vueuse/core'
 import api from '../services/api'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
@@ -38,6 +38,11 @@ watch(query, (val) => search(val))
 
 watch(() => props.isOpen, (open) => {
   if (!open) { query.value = ''; users.value = []; error.value = '' }
+})
+
+// Esc закрывает модалку: чат под ней остаётся открытым
+onKeyStroke('Escape', () => {
+  if (props.isOpen) emit('close')
 })
 
 async function addMember(userId: string) {
