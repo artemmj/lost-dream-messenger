@@ -6,12 +6,14 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Prefetch
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
+from drf_spectacular.views import SpectacularAPIView
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .consumers import message_payload
 from .models import Chat, Membership, Message
@@ -51,6 +53,21 @@ class ChatViewSet(viewsets.ModelViewSet):
 
     permission_classes = [IsAuthenticated]
     http_method_names = ["get", "post", "delete"]
+
+    # Лимиты на запись строже, чем на чтение; list/retrieve остаются только на
+    # глобальном user-троттле (scope None → ScopedRateThrottle пропускает запрос).
+    ACTION_THROTTLE_SCOPES = {
+        "send_message": "send",
+        "create": "write",
+        "create_private": "write",
+        "add_member": "write",
+        "remove_member": "write",
+        "destroy": "write",
+    }
+
+    def get_throttles(self):
+        self.throttle_scope = self.ACTION_THROTTLE_SCOPES.get(self.action)
+        return super().get_throttles()
 
     def get_queryset(self):
         # 👈 Защита от spectular fake view
@@ -427,6 +444,8 @@ class RegisterView(generics.CreateAPIView):
 
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    # Анонимный запрос: ScopedRateThrottle считает по IP
+    throttle_scope = "register"
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -458,11 +477,27 @@ class RegisterView(generics.CreateAPIView):
         )
 
 
+class LoginView(TokenObtainPairView):
+    # Сабкласс только чтобы задать throttle_scope: brute-force паролей — главный вектор
+    throttle_scope = "auth"
+
+
+class RefreshView(TokenRefreshView):
+    throttle_scope = "auth"
+
+
+class SchemaView(SpectacularAPIView):
+    # drf-spectacular генерирует схему заново на каждый запрос — отдельный лимит
+    throttle_scope = "schema"
+
+
 class UserSearchView(generics.ListAPIView):
     """Поиск пользователей по номеру телефона или имени"""
 
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+    # icontains = LIKE '%…%' без индекса: запрос дорогой, ещё и enumeration
+    throttle_scope = "search"
 
     @extend_schema(
         summary="Поиск пользователей",

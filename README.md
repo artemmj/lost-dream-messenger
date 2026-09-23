@@ -55,6 +55,12 @@ Real-time мессенджер: бэкенд на Django (DRF + Channels), фр�
 - Модалка нового чата: личный (debounced-поиск) или групповой (название + мультивыбор участников)
 - Vite proxy для API/WS — разработка без CORS
 
+### Защита от abuse (REST)
+- Rate limiting на встроенном DRF-троттлинге: глобальные лимиты по IP (`anon` 120/min) и по пользователю (`user` 600/min) + точечные scope'ы — логин/refresh (10/min), регистрация (5/min), отправка сообщений (60/min), изменение чатов (30/min), поиск пользователей (20/min), схема OpenAPI (30/hour)
+- Счётчики в Redis (отдельная БД от channel layer и presence); `NUM_PROXIES = 1` — идентификатор берётся из IP, который дописал nginx, а не из подделываемого клиентом `X-Forwarded-For`
+- Превышение лимита → `429` + заголовок `Retry-After`
+- Для WebSocket лимитов пока нет (в планах)
+
 ## 🚀 Быстрый старт
 
 ### Prerequisites
@@ -93,7 +99,7 @@ Frontend в compose запускается в dev-режиме (Vite HMR). Prod-
 - [ ] Message editing / deletion
 - [ ] Тесты (pytest + Vitest)
 - [ ] CI/CD pipeline
-- [ ] Rate limiting
+- [ ] Rate limiting для WebSocket + `limit_req`/`limit_conn` в nginx (REST уже закрыт DRF-троттлингом)
 - [ ] Настройки из env (SECRET_KEY, DEBUG) — сейчас захардкожены
 - [ ] Production deploy (nginx + SSL, prod-сервис frontend в compose)
 

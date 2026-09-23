@@ -113,6 +113,17 @@ MAILERS = {
     },
 }
 
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+
+# DRF-троттлинг хранит счётчики в кэше: LocMemCache дал бы отдельный лимит на
+# каждый процесс, поэтому считаем в Redis (БД 1 — отдельно от channel layer и presence).
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": f"redis://{REDIS_HOST}:6379/1",
+    }
+}
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -122,6 +133,26 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 50,
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        # Без throttle_scope на view пропускает запрос — поэтому можно включить глобально
+        "rest_framework.throttling.ScopedRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "120/min",
+        "user": "600/min",
+        # Точечные scope'ы (ScopedRateThrottle) — см. messenger/views.py и urls.py
+        "auth": "10/min",  # login/refresh: анонимные, ключ — IP
+        "register": "5/min",
+        "send": "60/min",
+        "write": "30/min",
+        "search": "20/min",
+        "schema": "30/hour",
+    },
+    # Один прокси (nginx): без этого DRF берёт весь X-Forwarded-For целиком,
+    # а он подделывается заголовком запроса.
+    "NUM_PROXIES": 1,
 }
 
 SIMPLE_JWT = {
@@ -167,7 +198,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
         "CONFIG": {
-            "hosts": [f"redis://{os.environ.get('REDIS_HOST', 'redis')}:6379/0"],
+            "hosts": [f"redis://{REDIS_HOST}:6379/0"],
             "capacity": 1500,
             "expiry": 10,
         },

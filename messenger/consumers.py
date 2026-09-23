@@ -1,8 +1,7 @@
-import os
-
 import redis.asyncio as aioredis
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
@@ -23,7 +22,7 @@ def get_redis() -> aioredis.Redis:
     global _redis_client
     if _redis_client is None:
         _redis_client = aioredis.from_url(
-            f"redis://{os.environ.get('REDIS_HOST', 'redis')}:6379/0",
+            f"redis://{settings.REDIS_HOST}:6379/0",
             decode_responses=True,
         )
     return _redis_client

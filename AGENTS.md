@@ -10,14 +10,14 @@
 ```
 lost-dream-messenger/
 ├── config/                        # Django project
-│   ├── settings.py                # DB, MIDDLEWARE (+ LastSeenMiddleware), REST_FRAMEWORK, SIMPLE_JWT, SPECTACULAR, CHANNEL_LAYERS, CORS
+│   ├── settings.py                # DB, MIDDLEWARE (+ LastSeenMiddleware), CACHES (Redis), REST_FRAMEWORK (+ троттлинг), SIMPLE_JWT, SPECTACULAR, CHANNEL_LAYERS, CORS
 │   ├── asgi.py                    # ASGI app: ProtocolTypeRouter (HTTP + WebSocket, AllowedHostsOriginValidator)
 │   ├── urls.py                    # admin/ + api/v1/ → messenger.urls
 │   └── wsgi.py                    # Fallback (в prod не используется, сервер — Daphne)
 ├── messenger/                     # Django app (единственное приложение)
 │   ├── models.py                  # User, Chat, Membership, Message + кастомный UserManager
 │   ├── serializers.py             # DRF-сериалайзеры + Swagger-аннотации
-│   ├── views.py                   # ChatViewSet, RegisterView, UserSearchView, MeView
+│   ├── views.py                   # ChatViewSet, RegisterView, LoginView/RefreshView/SchemaView, UserSearchView, MeView
 │   ├── consumers.py               # ChatConsumer (AsyncJsonWebsocketConsumer) + message_payload()
 │   ├── activity.py                # touch_last_seen() — обновление last_seen с троттлингом 60 с
 │   ├── middleware.py              # LastSeenMiddleware — активность на авторизованных REST-запросах
@@ -69,6 +69,8 @@ lost-dream-messenger/
 | `select_for_update` в `create_private` | Идемпотентность пары пользователей без unique-индекса (на M2M его не выразить); блокировка строк в порядке `id` исключает deadlock |
 | `LastSeenMiddleware` читает `request.user` в response-фазе | DRF аутентифицирует запрос внутри view и сам пробрасывает пользователя в Django HttpRequest — до view там всегда аноним |
 | `touch_last_seen()` с троттлингом 60 с | Активность пишется в БД не чаще раза в минуту; условие троттлинга продублировано в `UPDATE` на случай протухшего объекта в памяти |
+| DRF-троттлинг + кэш в Redis, без новых зависимостей | Встроенные `AnonRateThrottle`/`UserRateThrottle`/`ScopedRateThrottle` закрывают REST; `redis-py` уже нужен для presence. `django-ratelimit` не добавляли |
+| `ScopedRateThrottle` в глобальных `DEFAULT_THROTTLE_CLASSES` | Без `throttle_scope` на view он пропускает запрос — точечный лимит добавляется одной строкой, а не переопределением `throttle_classes` в каждой вьюхе |
 
 ## 📦 Модели данных
 
@@ -98,9 +100,36 @@ lost-dream-messenger/
 | GET | `/docs/` | Swagger UI |
 | GET | `/schema/` | OpenAPI 3.0 schema |
 
-Общие настройки DRF: JWT-аутентификация, `IsAuthenticated` по умолчанию, `PageNumberPagination` (PAGE_SIZE=50), DjangoFilterBackend.
+Общие настройки DRF: JWT-аутентификация, `IsAuthenticated` по умолчанию, `PageNumberPagination` (PAGE_SIZE=50), DjangoFilterBackend, троттлинг (см. «🚦 Rate limiting»).
 
 `ChatViewSet.http_method_names = ["get", "post", "delete"]` — PUT/PATCH отключены, поэтому переименовать GROUP-чат через API нельзя (см. «В планах»).
+
+## 🚦 Rate limiting (REST)
+
+Счётчики живут в DRF-троттлинге, кэш — Redis: `CACHES` указывает на БД **1** (channel layer и presence — в БД 0). На LocMemCache лимит считался бы отдельно в каждом процессе.
+
+`DEFAULT_THROTTLE_CLASSES` = `AnonRateThrottle` + `UserRateThrottle` + `ScopedRateThrottle`; последний пропускает запрос, если у view нет `throttle_scope`, поэтому включён глобально, а точечные лимиты задаются одной строкой на view.
+
+| Scope | Лимит | Где задан | Ключ |
+|-------|-------|-----------|------|
+| `anon` | 120/min | settings | IP |
+| `user` | 600/min | settings | user id |
+| `auth` | 10/min | `LoginView`, `RefreshView` | IP |
+| `register` | 5/min | `RegisterView` | IP |
+| `send` | 60/min | `ChatViewSet.ACTION_THROTTLE_SCOPES["send_message"]` | user id |
+| `write` | 30/min | `create`, `create_private`, `add_member`, `remove_member`, `destroy` | user id |
+| `search` | 20/min | `UserSearchView` | user id |
+| `schema` | 30/hour | `SchemaView` | IP |
+
+Превышение → **429** + `Retry-After`, тело `{"detail": "Request was throttled. Expected available in N seconds."}` (по-английски: `LANGUAGE_CODE = "en-us"`). Фронт показывает этот `detail` как есть (`auth.ts` берёт `e.response.data.detail`) — отдельной обработки 429 пока нет.
+
+`ChatViewSet.get_throttles()` проставляет `self.throttle_scope` из `ACTION_THROTTLE_SCOPES`: `get_throttles()` вызывается из `initial()` уже после `initialize_request()`, где DRF выставляет `self.action`, поэтому действие к этому моменту известно. `list`/`retrieve`/`messages` scope не имеют — для них работает только глобальный `user`.
+
+`NUM_PROXIES = 1` — не косметика: при дефолтном `None` `SimpleRateThrottle.get_ident()` возвращает **весь** `X-Forwarded-For` склеенный, то есть идентификатор целиком подделывается заголовком запроса. С `1` берётся последний элемент — IP, который дописал nginx (`nginx.conf` ставит `X-Forwarded-For` в блоке `/api/`). В dev Vite-proxy XFF не добавляет, поэтому `xff is None` и используется `REMOTE_ADDR` (в dev все запросы приходят с IP контейнера frontend).
+
+`LoginView`/`RefreshView`/`SchemaView` в `views.py` — сабклассы `TokenObtainPairView`/`TokenRefreshView`/`SpectacularAPIView`, нужны только чтобы задать `throttle_scope`.
+
+**WebSocket пока не ограничен** — см. «В планах».
 
 ## 🔌 WebSocket API
 
@@ -209,14 +238,16 @@ docker compose down -v && docker compose up --build -d
 - [ ] Vitest для frontend unit-тестов
 - [ ] ESLint/Prettier + pre-commit hooks (ruff для backend уже есть)
 - [ ] CI/CD (GitHub Actions)
-- [ ] Rate limiting (API и WS)
+- [x] Rate limiting REST (DRF-троттлинг: глобальные anon/user + scope'ы auth/register/send/write/search/schema, счётчики в Redis)
+- [ ] Rate limiting WebSocket (лимитеры в `ChatConsumer`: сообщения, частота подключений, кап на одновременные соединения) + `limit_req`/`limit_conn` в nginx
+- [ ] Обработка 429 на фронте (сейчас показываем английский `detail` от DRF как есть)
 - [ ] Logging + Sentry
 - [ ] Production deploy: prod-сервис frontend в compose, SSL, настройки из env
 
 ## ⚠️ Известные ограничения / Tech Debt
 
 1. **SECRET_KEY и DEBUG захардкожены** в `settings.py`; `DJANGO_SECRET_KEY`/`DJANGO_DEBUG` из `.env.example` **не читаются** — перед деплоем перевести на env.
-2. **Нет rate limiting** — API и WS открыты для abuse.
+2. **Rate limiting только на REST** — WS (`connect`/`receive_json`) по-прежнему открыт для abuse; `/admin/` DRF-троттлинг не покрывает.
 3. **Нет тестов** — покрытие 0% (backend + frontend).
 4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
 5. **Нет soft-delete** — удаление чата/сообщения физическое.
