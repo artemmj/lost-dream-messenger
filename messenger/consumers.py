@@ -8,6 +8,11 @@ from django.utils import timezone
 
 from .activity import touch_last_seen
 from .models import Membership, Message
+from .ratelimit import (
+    CONNECT_LIMITER,
+    MAX_CONNECTIONS_PER_USER,
+    MESSAGE_LIMITER,
+)
 from .ws_auth import get_user_from_scope
 
 User = get_user_model()
@@ -59,6 +64,26 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # Отказ анонимам
         if isinstance(self.user, AnonymousUser):
             await self.close(code=4001)
+            return
+
+        # Лимиты подключения — до accept и до presence-счётчика, чтобы отказ не
+        # сдвигал состояние «онлайн». Redis проверяем раньше запроса к БД: при
+        # reconnect-шторме проверка участия — тоже дорогая часть.
+        redis_client = get_redis()
+        user_key = str(self.user.id)
+        if (
+            await CONNECT_LIMITER.hit(redis_client, f"messenger:rl:conn:{user_key}")
+            > CONNECT_LIMITER.limit
+        ):
+            await self.close(code=4029)
+            return
+
+        # Кап на одновременные соединения читаем ДО _presence_enter: инкремент с
+        # последующим откатом пришлось бы синхронизировать с disconnect(), который
+        # декрементит сам. Гонка «два соединения прошли кап» для ограничения неважна.
+        connections = int(await redis_client.hget(PRESENCE_KEY, user_key) or 0)
+        if connections >= MAX_CONNECTIONS_PER_USER:
+            await self.close(code=4009)
             return
 
         # Проверка участия в чате
@@ -134,6 +159,23 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # Перепроверка участия: пользователя могли удалить из чата после connect
         if not await self._check_membership():
             await self.close(code=4003)
+            return
+
+        # Анти-флуд: считаем каждый кадр, а не только валидный текст — иначе
+        # мусором лимит обходится. Дорогие части (запись в БД и broadcast всей
+        # группе) ниже просто не выполняются, поэтому соединение держим.
+        hits = await MESSAGE_LIMITER.hit(
+            get_redis(), f"messenger:rl:msg:{self.user.id}"
+        )
+        if hits > MESSAGE_LIMITER.limit:
+            await self.send_json(
+                {"error": "Слишком много сообщений, подождите немного"}
+            )
+            return
+
+        # Массив или строка вместо объекта упала бы на .get() с трейсбеком в лог
+        if not isinstance(content, dict):
+            await self.send_json({"error": "Некорректный формат сообщения"})
             return
 
         text = content.get("text", "").strip()

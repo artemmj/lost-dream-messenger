@@ -12,13 +12,20 @@ const chatStore = useChatStore()
 const inputText = ref('')
 const messagesContainer = ref<HTMLElement>()
 const showMembers = ref(false)
-// Сообщение вместо чата, когда сервер закрыл сокет по доступу (4003/4004)
+// Плашка вместо окна чата, когда сервер закрыл сокет
 const closedNotice = ref('')
+// Сервер отклонил событие, сокет при этом жив (пустой текст, анти-флуд)
+const sendError = ref('')
 
 const CLOSE_NOTICES: Record<number, string> = {
   4003: 'Вы удалены из этого чата',
   4004: 'Чат удалён',
+  4029: 'Real-time отключено: слишком много попыток переподключения. Обновите страницу через минуту.',
+  4009: 'Real-time отключено: слишком много открытых вкладок. Закройте лишние и обновите страницу.',
 }
+// Убираем чат из списка только когда мы перестали быть участником. При WS-лимитах
+// участник остаётся в чате — иначе лимитер выглядел бы как удаление чата.
+const FORGET_CHAT_CODES = [4003, 4004]
 
 // WebSocket подключение
 const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
@@ -39,11 +46,14 @@ const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
       chatStore.reloadMessages()
       chatStore.loadChats()
     },
-    // 4003 — не участник чата (удалён во время сессии), 4004 — чат удалён
+    onError: (message) => {
+      sendError.value = message
+    },
     onClose: (code) => {
       const notice = CLOSE_NOTICES[code]
-      if (notice && chatStore.selectedChatId) {
-        closedNotice.value = notice
+      if (!notice || !chatStore.selectedChatId) return
+      closedNotice.value = notice
+      if (FORGET_CHAT_CODES.includes(code)) {
         chatStore.removeChat(chatStore.selectedChatId)
       }
     },
@@ -61,6 +71,7 @@ let lastScrollTop = 0
 
 watch(() => chatStore.selectedChatId, () => {
   closedNotice.value = ''
+  sendError.value = ''
   isChatSwitch = true
   lastScrollTop = 0
 })
@@ -137,15 +148,18 @@ async function handleSend() {
   const text = inputText.value.trim()
   if (!text || !chatStore.selectedChatId) return
   inputText.value = ''
+  sendError.value = ''
 
   const sent = sendWs(text)
   if (!sent) {
     try {
       const { data } = await api.post(`/chats/${chatStore.selectedChatId}/send/`, { text })
       chatStore.addMessage(data)
-    } catch (e) {
+    } catch (e: any) {
       console.error('Send failed:', e)
       inputText.value = text
+      // Здесь же прилетает и 429 от REST-scope `send`
+      sendError.value = e.response?.data?.detail || 'Не отправлено, попробуйте ещё раз'
     }
   }
 }
@@ -169,6 +183,8 @@ async function handleSend() {
           Участники{{ chatStore.currentChatDetails ? ` (${chatStore.currentChatDetails.members.length})` : '' }}
         </button>
       </div>
+      <!-- При WS-лимитах чат остаётся выбранным — плашка показывается внутри окна -->
+      <div v-if="closedNotice" class="connection-notice">{{ closedNotice }}</div>
       <div ref="messagesContainer" class="messages-container" @scroll="handleScroll">
         <div v-if="chatStore.isLoadingHistory" class="history-loading">Загрузка истории...</div>
         <MessageBubble
@@ -178,6 +194,7 @@ async function handleSend() {
           :is-mine="msg.sender.id === auth.user?.id"
         />
       </div>
+      <div v-if="sendError" class="send-error">{{ sendError }}</div>
       <div class="input-area">
         <input
           v-model="inputText"

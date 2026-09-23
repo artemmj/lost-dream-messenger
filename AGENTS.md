@@ -18,9 +18,10 @@ lost-dream-messenger/
 │   ├── models.py                  # User, Chat, Membership, Message + кастомный UserManager
 │   ├── serializers.py             # DRF-сериалайзеры + Swagger-аннотации
 │   ├── views.py                   # ChatViewSet, RegisterView, LoginView/RefreshView/SchemaView, UserSearchView, MeView
-│   ├── consumers.py               # ChatConsumer (AsyncJsonWebsocketConsumer) + message_payload()
+│   ├── consumers.py               # ChatConsumer (AsyncJsonWebsocketConsumer) + message_payload() + WS-лимиты
 │   ├── activity.py                # touch_last_seen() — обновление last_seen с троттлингом 60 с
 │   ├── middleware.py              # LastSeenMiddleware — активность на авторизованных REST-запросах
+│   ├── ratelimit.py               # RedisWindowLimiter (Lua INCR+PEXPIRE) + лимиты WS: сообщения, подключения, кап сессий
 │   ├── ws_auth.py                 # JWT-аутентификация для WebSocket (token из query string)
 │   ├── routing.py                 # WebSocket URL patterns
 │   ├── admin.py                   # Django Admin с inlines (Membership, последние сообщения)
@@ -44,7 +45,7 @@ lost-dream-messenger/
     │   ├── App.vue                # При старте догружает профиль через /auth/me/
     │   └── main.ts
     ├── vite.config.ts             # Proxy /api и /ws → http://backend:8000 (Docker DNS)
-    ├── nginx.conf                 # Prod: SPA fallback + proxy /api и /ws → backend:8000
+    ├── nginx.conf                 # Prod: SPA fallback + proxy /api и /ws → backend:8000 + limit_req/limit_conn (429)
     ├── Dockerfile                 # node:22-alpine; targets: dev (Vite) / prod (nginx)
     └── package.json               # engines: node ^22.18 || >=24.12
 ```
@@ -70,6 +71,9 @@ lost-dream-messenger/
 | `LastSeenMiddleware` читает `request.user` в response-фазе | DRF аутентифицирует запрос внутри view и сам пробрасывает пользователя в Django HttpRequest — до view там всегда аноним |
 | `touch_last_seen()` с троттлингом 60 с | Активность пишется в БД не чаще раза в минуту; условие троттлинга продублировано в `UPDATE` на случай протухшего объекта в памяти |
 | DRF-троттлинг + кэш в Redis, без новых зависимостей | Встроенные `AnonRateThrottle`/`UserRateThrottle`/`ScopedRateThrottle` закрывают REST; `redis-py` уже нужен для presence. `django-ratelimit` не добавляли |
+| Свой `RedisWindowLimiter` для WS | DRF-троттлинг до consumer'ов не дотягивается; fixed window на Lua (`INCR`+`PEXPIRE`) — один round trip и O(1) памяти. Скользящее окно (ZSET) — переплата за точность |
+| Кап одновременных WS-соединений через presence-хеш | `messenger:presence` уже считает активные соединения пользователя — отдельный счётчик не заводим |
+| `MESSAGE_LIMITER` = 10/10 с, как REST-scope `send` | Иначе лимит обходится уходом в REST-fallback после закрытия сокета |
 | `ScopedRateThrottle` в глобальных `DEFAULT_THROTTLE_CLASSES` | Без `throttle_scope` на view он пропускает запрос — точечный лимит добавляется одной строкой, а не переопределением `throttle_classes` в каждой вьюхе |
 
 ## 📦 Модели данных
@@ -100,11 +104,13 @@ lost-dream-messenger/
 | GET | `/docs/` | Swagger UI |
 | GET | `/schema/` | OpenAPI 3.0 schema |
 
-Общие настройки DRF: JWT-аутентификация, `IsAuthenticated` по умолчанию, `PageNumberPagination` (PAGE_SIZE=50), DjangoFilterBackend, троттлинг (см. «🚦 Rate limiting»).
+Общие настройки DRF: JWT-аутентификация, `IsAuthenticated` по умолчанию, `PageNumberPagination` (PAGE_SIZE=50), DjangoFilterBackend, троттлинг (см. «🚦 Rate limiting → REST»).
 
 `ChatViewSet.http_method_names = ["get", "post", "delete"]` — PUT/PATCH отключены, поэтому переименовать GROUP-чат через API нельзя (см. «В планах»).
 
-## 🚦 Rate limiting (REST)
+## 🚦 Rate limiting
+
+### REST (DRF-троттлинг)
 
 Счётчики живут в DRF-троттлинге, кэш — Redis: `CACHES` указывает на БД **1** (channel layer и presence — в БД 0). На LocMemCache лимит считался бы отдельно в каждом процессе.
 
@@ -121,7 +127,7 @@ lost-dream-messenger/
 | `search` | 20/min | `UserSearchView` | user id |
 | `schema` | 30/hour | `SchemaView` | IP |
 
-Превышение → **429** + `Retry-After`, тело `{"detail": "Request was throttled. Expected available in N seconds."}` (по-английски: `LANGUAGE_CODE = "en-us"`). Фронт показывает этот `detail` как есть (`auth.ts` берёт `e.response.data.detail`) — отдельной обработки 429 пока нет.
+Превышение → **429** + `Retry-After`, тело `{"detail": "Request was throttled. Expected available in N seconds."}` (по-английски: `LANGUAGE_CODE = "en-us"`). Фронт показывает этот `detail` как есть: `auth.ts` берёт `e.response.data.detail` при входе/регистрации, `ChatWindow.vue` — при ошибке REST-отправки (scope `send`), строкой над полем ввода (`.send-error`).
 
 `ChatViewSet.get_throttles()` проставляет `self.throttle_scope` из `ACTION_THROTTLE_SCOPES`: `get_throttles()` вызывается из `initial()` уже после `initialize_request()`, где DRF выставляет `self.action`, поэтому действие к этому моменту известно. `list`/`retrieve`/`messages` scope не имеют — для них работает только глобальный `user`.
 
@@ -129,7 +135,21 @@ lost-dream-messenger/
 
 `LoginView`/`RefreshView`/`SchemaView` в `views.py` — сабклассы `TokenObtainPairView`/`TokenRefreshView`/`SpectacularAPIView`, нужны только чтобы задать `throttle_scope`.
 
-**WebSocket пока не ограничен** — см. «В планах».
+### WebSocket (`messenger/ratelimit.py`)
+
+DRF-троттлинг до Channels-consumer'ов не дотягивается, поэтому лимиты свои: `RedisWindowLimiter` — фиксированное окно на Redis, один вызов Lua-скрипта `INCR` + `PEXPIRE` (атомарно), O(1) памяти и один round trip на событие. Компромисс — всплеск до 2× лимита на границе окна; скользящее окно (ZSET) было бы переплатой за точность. Ключи: `messenger:rl:conn:{user_id}` и `messenger:rl:msg:{user_id}`, БД 0 (та же, что presence и channel layer).
+
+| Лимит | Значение | Ключ | Где | Превышение |
+|-------|----------|------|-----|-----------|
+| `MESSAGE_LIMITER` | 10 / 10 с | `messenger:rl:msg:{user_id}` | `receive_json()` | `{error: ...}` в тот же сокет, соединение живое |
+| `CONNECT_LIMITER` | 20 / 60 с | `messenger:rl:conn:{user_id}` | `connect()` | close **4029**, клиент не reconnect'ится |
+| `MAX_CONNECTIONS_PER_USER` | 5 | presence-хеш `messenger:presence` | `connect()` | close **4009** |
+
+`MESSAGE_LIMITER` намеренно того же порядка, что REST-scope `send` (60/min) — иначе лимит обходится уходом в REST-fallback. Считается **до** валидации текста, чтобы мусором его не выжигать; при превышении дорогие части (запись в БД, broadcast всей группе) просто не выполняются, поэтому сокет не закрываем — эскалация потребовала бы reconnect-пластинки в UI ради выгоды, которой нет.
+
+`CONNECT_LIMITER` и кап одновременных соединений проверяются в `connect()` **до** `accept()` и до `_presence_enter()` — отказ не должен сдвигать состояние «онлайн». Кап читается из уже существующего presence-счётчика (`HGET`), отдельного учёта не заводим; гонка «два соединения прошли кап» для ограничения неважна, а откат инкремента пришлось бы синхронизировать с `disconnect()`.
+
+Daphne дополнительно ограничивает размер кадра: `--websocket-max-message-size 16384` в команде сервиса `backend` (дефолт 1 MiB). nginx в prod держит `limit_req` на `/api/` и `limit_conn` на `/ws/` (см. «🐳 Инфраструктура»).
 
 ## 🔌 WebSocket API
 
@@ -145,17 +165,17 @@ lost-dream-messenger/
 | `user_status` | `{user_id, status: "online"\|"offline"}` | Статус пользователя (фронт хранит в `onlineUsers` и показывает точку в шапке личного чата) |
 | `messages_read` | `{reader_id}` | Кто-то прочитал сообщения (приходит и самому читателю — клиент обязан фильтровать по `reader_id != my_id`) |
 | `initial_presence` | `{user_ids: [...]}` | При подключении: id участников чата, которые сейчас онлайн (отправляется только подключившемуся клиенту) |
-| `{error: "..."}` | — | Пустое/слишком длинное сообщение |
+| `{error: "..."}` | — | Сервер отклонил событие: пустое/слишком длинное/некорректный формат сообщение или анти-флуд (`MESSAGE_LIMITER`). Соединение при этом остаётся открытым |
 
 **События клиент → сервер:**
 
 | type | Payload | Описание |
 |------|---------|----------|
-| *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке, `last_seen` отправителя обновляется с троттлингом 60 с |
+| *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке, затем анти-флуд (`MESSAGE_LIMITER`), `last_seen` отправителя обновляется с троттлингом 60 с |
 
-**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → presence: `HINCRBY messenger:presence {user_id} 1`, broadcast `user_status: online` **только при счётчике 1** → отправка `initial_presence` подключившемуся клиенту.
+**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → лимит частоты подключений (`CONNECT_LIMITER`, отказ 4029) → кап одновременных соединений (presence-счётчик, отказ 4009) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → presence: `HINCRBY messenger:presence {user_id} 1`, broadcast `user_status: online` **только при счётчике 1** → отправка `initial_presence` подключившемуся клиенту.
 
-**Поведение при отключении:** `HINCRBY -1`; broadcast `user_status: offline` и обновление `last_seen` — **только при счётчике 0** (учитывается несколько вкладок/устройств). Если соединение закрыто до accept (4001/4003), счётчик не трогается.
+**Поведение при отключении:** `HINCRBY -1`; broadcast `user_status: offline` и обновление `last_seen` — **только при счётчике 0** (учитывается несколько вкладок/устройств). Если соединение закрыто до accept (4001/4003/4009/4029), счётчик не трогается.
 
 **Удаление участника:** REST `remove-member` шлёт в группу событие `member.removed` — consumer удалённого пользователя закрывает его сокет с кодом 4003 (фронт по этому коду убирает чат из списка).
 
@@ -168,14 +188,18 @@ lost-dream-messenger/
 | 4001 | Невалидный/отсутствующий JWT |
 | 4003 | Пользователь не участник чата (в т.ч. удалён из чата во время сессии) |
 | 4004 | Чат удалён |
+| 4009 | Превышен кап одновременных соединений (`MAX_CONNECTIONS_PER_USER`) |
+| 4029 | Превышена частота подключений (`CONNECT_LIMITER`) за окно |
+
+Фронт не reconnect'ится ни на один из этих кодов — при лимитах переподключение только продлевает бан (счётчик пополняется каждым новым handshake).
 
 ## 🖥 Frontend (Vue 3 SPA)
 
 - **auth.ts (Pinia)**: login/register сохраняют токены в localStorage и грузят профиль через `/auth/me/`; `getUserFromToken()` при перезагрузке восстанавливает из JWT только `id` (payload не содержит имени/телефона), полный профиль догружает `App.vue` в `onMounted`. Logout — только очистка localStorage.
 - **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (первая страница сообщений + `loadChatDetails()`), `loadOlderMessages()` (prepend следующей страницы; состояние `messagesPage`/`hasMoreMessages`/`isLoadingHistory`; guard от смены чата во время запроса), `reloadMessages()` (перечитывание первой страницы после WS-reconnect: если вернулась полная страница (`MESSAGES_PAGE_SIZE = 50`) — история перезагружается целиком, иначе новые сообщения добираются в хвост, а у уже известных обновляется `is_read`), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`, `removeChat()`. Presence: `onlineUsers` (Set id) + `setUserStatus()`/`setInitialPresence()`. Состояние WS: `wsStatus` (`WsStatus`, тип экспортируется и используется в useChatSocket) + `setWsStatus()` — пишет ChatWindow, отображает ChatSidebar; сбрасывается в `disconnected` в `resetMessages()`.
 - **api.ts**: axios с Bearer-interceptor; при 401 — один retry через `/auth/refresh/`, при неудаче — очистка токенов и редирект на `/login`.
-- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c (кроме кодов 4001/4003/4004), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onClose(code)`, `onReconnect()`. Все хэндлеры сокета проверяют `ws !== socket` — события соединения, закрытого при смене чата, игнорируются. Флаг `hadConnection` отличает reconnect от первого подключения (сбрасывается в watch на `chatId`; считается установленным и после неудачного соединения, поэтому пропущенные сообщения добираются и при первом подключении со второй попытки).
-- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; при close-кодах 4003/4004 — `removeChat()` + плашка («Вы удалены из этого чата» / «Чат удалён»); по `onReconnect` — `reloadMessages()` + `loadChats()` (прокрутку к новым сообщениям выполняет watcher по `lastMessageId`).
+- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c, кроме кодов из `NO_RECONNECT_CODES` (4001/4003/4004 — доступ, 4009/4029 — WS-лимиты: переподключение только продлевает бан), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onError(message)` (сервер отклонил событие, сокет жив), `onClose(code)`, `onReconnect()`. Все хэндлеры сокета проверяют `ws !== socket` — события соединения, закрытого при смене чата, игнорируются. Флаг `hadConnection` отличает reconnect от первого подключения (сбрасывается в watch на `chatId`; считается установленным и после неудачного соединения, поэтому пропущенные сообщения добираются и при первом подключении со второй попытки).
+- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input, а `detail` ответа — в строку `.send-error` над полем ввода, туда же уходит и 429 от REST-scope `send`); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; `CLOSE_NOTICES` — плашка по коду закрытия: 4003/4004 (`FORGET_CHAT_CODES`) убирают чат из списка через `removeChat()` и показываются в empty-state, 4009/4029 оставляют чат выбранным (участник-то остался) и показываются баннером `.connection-notice` под шапкой; `onError` пишет текст отказа в `sendError`; по `onReconnect` — `reloadMessages()` + `loadChats()` (прокрутку к новым сообщениям выполняет watcher по `lastMessageId`).
 - **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
 - **GroupMembersModal.vue**: список участников (бейджи «админ»/«вы»); админ — debounced-поиск и добавление (`POST add-member/`), удаление любого (`POST remove-member/`); любой участник — «Выйти» (выход из чата, при опустевшем чате сервер его удаляет).
 - **NewChatModal.vue**: режимы «Личный / Групповой». Личный: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка + **автовыбор** чата. Групповой: название + мультивыбор пользователей из поиска (chips) → `POST /chats/ {type, name, member_ids}` → автовыбор.
@@ -184,9 +208,10 @@ lost-dream-messenger/
 
 ## 🐳 Инфраструктура
 
-- **docker-compose.yml**: сервисы `db` (postgres:18, порт на хосте **5434**, healthcheck), `redis` (7-alpine, healthcheck, порт 6379), `backend` (build из корневого Dockerfile; команда: migrate → collectstatic → daphne; bind-mount `.:/app`; volume `media_data`), `frontend` (target `dev`, bind-mount исходников для HMR). **Сервис называется `backend`, не `web`.**
+- **docker-compose.yml**: сервисы `db` (postgres:18, порт на хосте **5434**, healthcheck), `redis` (7-alpine, healthcheck, порт 6379), `backend` (build из корневого Dockerfile; команда: migrate → collectstatic → daphne с `--websocket-max-message-size 16384`; bind-mount `.:/app`; volume `media_data`), `frontend` (target `dev`, bind-mount исходников для HMR). **Сервис называется `backend`, не `web`.**
 - **Dockerfile (backend)**: python:3.13-slim, multi-stage (pip `--prefix=/install`), непривилегированный `appuser`.
 - **Dockerfile (frontend)**: node:22-alpine, `npm ci`; target `dev` — Vite с `--host 0.0.0.0`; target `prod` — билд + nginx с `nginx.conf` (upstream `backend:8000`).
+- **nginx.conf (prod)**: `limit_req` на `/api/` (30 r/s на IP, burst 60 nodelay) и `limit_conn 10` на `/ws/`; обе зоны — `$binary_remote_addr`, ответы 429. Работает только на prod-таргете, в compose поднят `dev`.
 - **`.dockerignore`** (корневой, для образа backend): исключает `.git`, `.env*`, `.venv/`, кэши (`.ruff_cache/`, `.pytest_cache/`, `.mypy_cache/`), `frontend/` (у фронтенда собственный build-контекст `./frontend`), `node_modules/`, `media/`, `staticfiles/`.
 - Статика: WhiteNoise (`CompressedManifestStaticFilesStorage`), `collectstatic` выполняется в команде compose.
 - Swagger UI + drf-spectacular с JWT security scheme и persistAuthorization.
@@ -239,15 +264,17 @@ docker compose down -v && docker compose up --build -d
 - [ ] ESLint/Prettier + pre-commit hooks (ruff для backend уже есть)
 - [ ] CI/CD (GitHub Actions)
 - [x] Rate limiting REST (DRF-троттлинг: глобальные anon/user + scope'ы auth/register/send/write/search/schema, счётчики в Redis)
-- [ ] Rate limiting WebSocket (лимитеры в `ChatConsumer`: сообщения, частота подключений, кап на одновременные соединения) + `limit_req`/`limit_conn` в nginx
-- [ ] Обработка 429 на фронте (сейчас показываем английский `detail` от DRF как есть)
+- [x] Rate limiting WebSocket (`RedisWindowLimiter`: анти-флуд сообщений, частота подключений, кап на одновременные соединения; коды 4009/4029)
+- [x] `limit_req`/`limit_conn` в nginx (`frontend/nginx.conf`: `/api/` 30 r/s + burst 60, `/ws/` до 10 соединений на IP, ответы — 429)
+- [ ] Prod-обвязка: `frontend` в compose на таргете `prod` (сейчас `dev`), SSL, настройки из env — без этого `nginx.conf` с лимитами не исполняется
+- [ ] Обработка 429 на фронте (текст DRF показывается как есть, он по-английски; локализации и `Retry-After`-таймера нет)
 - [ ] Logging + Sentry
 - [ ] Production deploy: prod-сервис frontend в compose, SSL, настройки из env
 
 ## ⚠️ Известные ограничения / Tech Debt
 
 1. **SECRET_KEY и DEBUG захардкожены** в `settings.py`; `DJANGO_SECRET_KEY`/`DJANGO_DEBUG` из `.env.example` **не читаются** — перед деплоем перевести на env.
-2. **Rate limiting только на REST** — WS (`connect`/`receive_json`) по-прежнему открыт для abuse; `/admin/` DRF-троттлинг не покрывает.
+2. **Rate limiting не покрывает `/admin/`** — DRF-троттлинг работает только на DRF-view'ах, Django Admin не ограничен ничем; WS-лимитеры в `ChatConsumer` есть, но nginx-слой с `limit_req`/`limit_conn` исполняется только на prod-таргете фронтенда (в compose поднят `dev`).
 3. **Нет тестов** — покрытие 0% (backend + frontend).
 4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
 5. **Нет soft-delete** — удаление чата/сообщения физическое.

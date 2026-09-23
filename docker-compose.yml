@@ -26,10 +26,12 @@ services:
 
   backend:
     build: .
+    # Переносы строк внутри sh -c "..." — отдельные команды: каждую команду держим
+    # на одной строке, иначе аргументы daphne уедут в собственный запуск.
     command: >
       sh -c "python manage.py migrate &&
               python manage.py collectstatic --noinput &&
-              daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+              daphne -b 0.0.0.0 -p 8000 --websocket-max-message-size 16384 config.asgi:application"
     volumes:
       - .:/app
       - media_data:/app/media

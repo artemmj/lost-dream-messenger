@@ -7,10 +7,17 @@ interface WsCallbacks {
   onUserStatus: (userId: string, status: string) => void
   onMessagesRead: (readerId: string) => void
   onInitialPresence: (userIds: string[]) => void
+  /** Сервер отклонил событие (пустой текст, анти-флуд) — соединение при этом живое */
+  onError?: (message: string) => void
   onClose?: (code: number) => void
   /** Соединение восстановлено после обрыва — пора перечитать историю */
   onReconnect?: () => void
 }
+
+// 4001 — невалидный JWT, 4003/4004 — вылет из чата, 4009/4029 — WS-лимиты.
+// При лимитах reconnect только продлит бан: счётчик подключений в Redis
+// пополняется каждым новым handshake.
+const NO_RECONNECT_CODES = [4001, 4003, 4004, 4009, 4029]
 
 /**
  * Composable для WebSocket-подключения к чату.
@@ -59,6 +66,8 @@ export function useChatSocket(
           callbacks.onMessagesRead(data.reader_id)
         } else if (data.type === 'initial_presence') {
           callbacks.onInitialPresence(data.user_ids ?? [])
+        } else if (data.error) {
+          callbacks.onError?.(data.error)
         } else if (data.id) {
           callbacks.onMessage(data as Message)
         }
@@ -75,8 +84,7 @@ export function useChatSocket(
       // Даже неудачное соединение считается: следующее открытие — reconnect
       hadConnection = true
       callbacks.onClose?.(event.code)
-      // Авто-reconnect кроме случаев отказа в авторизации/доступе/удаления чата
-      if (![4001, 4003, 4004].includes(event.code)) {
+      if (!NO_RECONNECT_CODES.includes(event.code)) {
         setTimeout(() => {
           if (chatId() === id) connect(id)
         }, 2000)
