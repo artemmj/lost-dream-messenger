@@ -1,99 +1,101 @@
-# 💬 Messenger API
+# 💬 Lost Dream Messenger
 
-> ⚠️ **Work in Progress**  
+> ⚠️ **Work in Progress**
 > Проект находится в активной разработке.
 
-Real-time мессенджер с бэкендом на Django Channels и фронтендом на Vue 3.
+Real-time мессенджер: бэкенд на Django (DRF + Channels), фронтенд на Vue 3 (TypeScript, Pinia). Доставка сообщений через WebSocket, JWT-аутентификация, всё поднимается одним `docker compose up`.
 
 ## 🛠 Стек
 
 | Компонент | Технология | Версия |
 |-----------|-----------|--------|
-| Backend | Django + DRF + Channels | 5.1+ / 3.15+ / 4.x |
+| Backend | Django + DRF + Channels | 5.2 / 3.18 / 4.3 |
 | Database | PostgreSQL | 18 |
-| Cache/PubSub | Redis | 7 |
-| Auth | JWT (SimpleJWT) | — |
+| Cache/PubSub | Redis (channels_redis pub/sub) | 7 |
+| Auth | JWT (SimpleJWT) | 5.5 |
 | API Docs | drf-spectacular (OpenAPI 3.0) | — |
-| Frontend | Vue 3 + Vite + TypeScript + Pinia | 3.x / 6.x |
-| Build Tool | Vite | 6.x |
-| Server | Daphne (ASGI) | — |
+| Frontend | Vue 3 + TypeScript + Pinia + Vue Router | 3.5 |
+| Build Tool | Vite | 8.x |
+| Server | Daphne (ASGI, HTTP + WebSocket) | — |
 | Containerization | Docker Compose | — |
-
-### Инфраструктура
-- Docker Compose (backend + frontend + PostgreSQL + Redis)
-- Daphne ASGI server
-- Redis Pub/Sub channel layer
-- Swagger UI (`/api/v1/docs/`)
-- Vite dev server с proxy
-- Nginx для production-раздачи frontend
 
 ## ✅ Реализованный функционал
 
 ### Аутентификация
-- Регистрация с валидацией пароля
-- JWT login / refresh / logout
-- Авто-refresh токена при 401
-- Восстановление сессии при перезагрузке страницы
-- Эндпоинт /auth/me/ для получения профиля по токену
+- Регистрация (телефон как логин) + JWT сразу в ответе
+- Login / refresh (SimpleJWT), авто-refresh токена при 401 на фронте
+- Восстановление сессии при перезагрузке: профиль догружается через `/auth/me/`
+- Logout — клиентский (очистка токенов в localStorage)
 
 ### Чаты
-- Создание личных чатов (идемпотентно, без дубликатов)
-- Создание групповых чатов
-- Список чатов с последним сообщением
-- Управление участниками (добавление/удаление/выход)
-- Поиск пользователей по телефону/имени
+- Личные чаты: создание идемпотентно (существующий чат возвращается, дубликат не создаётся)
+- Групповые чаты: создание через API, роль администратора у создателя
+- Управление участниками: добавление (только админ, только для групп), удаление/выход, защита от удаления единственного админа, авто-удаление опустевшего чата
+- Список чатов с последним сообщением и собеседником
+- Поиск пользователей по телефону/имени (с исключением себя, лимит 20)
 
 ### Сообщения
-- Отправка текстовых сообщений
-- История сообщений с пагинацией
-- **Real-time доставка через WebSocket**
-- **Read receipts** (✓ отправлено / ✓✓ прочитано)
-- REST fallback при недоступности WebSocket
+- Отправка текста (до 5000 символов) через WebSocket
+- REST fallback `POST /chats/{id}/send/` — с real-time рассылкой подключённым WS-клиентам
+- История с пагинацией: первая страница = последние 50 сообщений
+- Read receipts (✓ отправлено / ✓✓ прочитано), отметка о прочтении при подключении к чату
+- Участник, удалённый из чата, теряет возможность писать (проверка при каждом WS-сообщении)
 
 ### Real-time (WebSocket)
-- Мгновенная доставка сообщений
-- Онлайн/оффлайн статусы участников
-- Авто-reconnect при разрыве соединения
-- JWT-аутентификация через query string
+- Мгновенная доставка сообщений всем участникам чата
+- События онлайн/оффлайн статусов и прочтения (рассылаются сервером; UI присутствия собеседника пока не реализован — см. планы)
+- Авто-reconnect при разрыве соединения (фиксированная задержка 2 c)
+- JWT-аутентификация через query string (`?token=<jwt>`)
 
 ### Frontend (Vue 3 SPA)
-- Авторизация с защищёнными роутами
-- Debounced поиск пользователей для создания чата
-- Индикатор статуса WebSocket-соединения
-- Адаптивный layout (sidebar + chat area)
+- Login/Register экраны, защищённые роуты (navigation guard)
+- Sidebar со списком чатов и превью последнего сообщения
+- Окно чата с live-сообщениями и индикатором состояния WS-соединения
+- Создание личного чата через модалку с debounced-поиском пользователей (@vueuse)
+- Vite proxy для API/WS — разработка без CORS
 
 ## 🚀 Быстрый старт
 
 ### Prerequisites
 - Docker & Docker Compose
-- Node.js 20+
+- Node.js 22+ (только для локальной разработки фронтенда вне Docker)
 
 ```bash
 # Клонировать и запустить
-git clone <repo-url> && cd messenger
-cp .env.example .env  # Создай .env из примера
+git clone <repo-url> && cd lost-dream-messenger
+cp .env.example .env
 docker compose up --build -d
 
 # Создать суперпользователя
-docker compose exec web python manage.py createsuperuser
+docker compose exec backend python manage.py createsuperuser
+
+# Логи
+docker compose logs -f
 ```
+
+Frontend в compose запускается в dev-режиме (Vite HMR). Prod-вариант (nginx) собирается из того же Dockerfile (`target: prod`), но отдельного сервиса в compose для него пока нет.
 
 ### Доступные URL
 
 | URL | Описание |
 |-|-|
-| http://localhost:5173 | Vue 3 SPA (dev) |
+| http://localhost:5173 | Vue 3 SPA (Vite dev) |
 | http://localhost:8000/api/v1/docs/ | Swagger UI |
+| http://localhost:8000/api/v1/schema/ | OpenAPI schema |
 | http://localhost:8000/admin/ | Django Admin |
+| localhost:5434 | PostgreSQL (проброшен на хост) |
 
 ## 📋 Планы развития
-- [x] Визуальный онлайн-статус собеседника
+- [ ] Визуальный онлайн-статус собеседника (события `user_status` уже приходят с сервера)
 - [ ] Групповые чаты из UI (создание + управление участниками)
-- [ ] Пагинация сообщений (infinite scroll)
+- [ ] Пагинация сообщений в UI (infinite scroll вверх)
 - [ ] Typing indicators
 - [ ] Загрузка файлов и изображений
 - [ ] Message editing / deletion
 - [ ] Тесты (pytest + Vitest)
 - [ ] CI/CD pipeline
 - [ ] Rate limiting
-- [ ] Production deploy (nginx + SSL)
+- [ ] Настройки из env (SECRET_KEY, DEBUG) — сейчас захардкожены
+- [ ] Production deploy (nginx + SSL, prod-сервис frontend в compose)
+
+Подробное описание архитектуры, API и ограничений — в [AGENTS.md](AGENTS.md).

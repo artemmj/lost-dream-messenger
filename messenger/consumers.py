@@ -7,6 +7,23 @@ from .ws_auth import get_user_from_scope
 from .models import Message, Membership
 
 
+def message_payload(msg: Message) -> dict:
+    """Единый формат сообщения для WS-рассылки (используется consumer'ом и REST)."""
+    return {
+        "id": str(msg.id),
+        "chat": str(msg.chat_id),
+        "sender": {
+            "id": str(msg.sender.id),
+            "phone": msg.sender.phone,
+            "first_name": msg.sender.first_name,
+            "last_name": msg.sender.last_name,
+        },
+        "text": msg.text,
+        "created_at": msg.created_at.isoformat(),
+        "is_read": msg.is_read,
+    }
+
+
 class ChatConsumer(AsyncJsonWebsocketConsumer):
     """
     WebSocket consumer для чата.
@@ -78,6 +95,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
     async def receive_json(self, content, **kwargs):
         """Обработка входящего сообщения от клиента"""
+        # Перепроверка участия: пользователя могли удалить из чата после connect
+        if not await self._check_membership():
+            await self.close(code=4003)
+            return
+
         text = content.get("text", "").strip()
         if not text:
             await self.send_json({"error": "Сообщение не может быть пустым"})
@@ -133,19 +155,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     @database_sync_to_async
     def _save_message(self, text: str) -> dict:
         msg = Message.objects.create(chat_id=self.chat_id, sender=self.user, text=text)
-        return {
-            "id": str(msg.id),
-            "chat": str(msg.chat_id),
-            "sender": {
-                "id": str(msg.sender.id),
-                "phone": msg.sender.phone,
-                "first_name": msg.sender.first_name,
-                "last_name": msg.sender.last_name,
-            },
-            "text": msg.text,
-            "created_at": msg.created_at.isoformat(),
-            "is_read": msg.is_read,
-        }
+        return message_payload(msg)
 
     @database_sync_to_async
     def _mark_messages_read(self):

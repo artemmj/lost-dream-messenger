@@ -18,7 +18,11 @@ const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
   {
     onMessage: (msg) => chatStore.addMessage(msg),
     onUserStatus: (userId, status) => console.log(`[WS] ${userId}: ${status}`),
-    onMessagesRead: () => chatStore.markAllRead(auth.user?.id || ''),
+    // Событие приходит и самому читателю — игнорируем собственное, иначе свои
+    // сообщения локально помечаются прочитанными, хотя собеседник их не читал
+    onMessagesRead: (readerId) => {
+      if (readerId !== auth.user?.id) chatStore.markAllRead(auth.user?.id || '')
+    },
   },
 )
 

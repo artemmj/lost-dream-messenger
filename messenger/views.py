@@ -1,5 +1,7 @@
 from uuid import UUID
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.db.models import Count, Prefetch
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
@@ -10,6 +12,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.views import APIView
 
+from .consumers import message_payload
 from .serializers import (
     AddMemberSerializer,
     PrivateChatCreateSerializer,
@@ -120,12 +123,13 @@ class ChatViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        messages = chat.messages.select_related("sender").all()
+        # Новые сообщения — на первой странице; внутри страницы порядок по возрастанию
+        messages = chat.messages.select_related("sender").order_by("-created_at")
 
         page = self.paginate_queryset(messages)
         if page is not None:
             serializer = MessageSerializer(
-                page, many=True, context={"request": request}
+                page[::-1], many=True, context={"request": request}
             )
             return self.get_paginated_response(serializer.data)
 
@@ -169,6 +173,13 @@ class ChatViewSet(viewsets.ModelViewSet):
             text=serializer.validated_data["text"],
         )
 
+        # Real-time доставка подключённым WS-клиентам (тот же формат, что у ChatConsumer)
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"chat_{chat.id}",
+            {"type": "chat.message", "message": message_payload(message)},
+        )
+
         return Response(
             MessageSerializer(message, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -198,6 +209,13 @@ class ChatViewSet(viewsets.ModelViewSet):
         ok, error = self._check_membership(chat, request.user, require_admin=True)
         if not ok:
             return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
+
+        # В личный чат добавлять участников нельзя (иначе ломается поиск дубликатов)
+        if chat.type == Chat.ChatType.PRIVATE:
+            return Response(
+                {"detail": "Нельзя добавить участника в личный чат"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         serializer = AddMemberSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
