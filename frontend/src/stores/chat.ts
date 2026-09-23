@@ -79,6 +79,9 @@ export const useChatStore = defineStore('chat', () => {
     messagesPage.value = 1
     hasMoreMessages.value = false
     currentChatDetails.value = null
+    // Присутствие относится к конкретному чату: без сброса до initial_presence
+    // показывали бы статусы участников предыдущего чата
+    onlineUsers.value = new Set()
     try {
       const { data } = await api.get(`/chats/${chatId}/messages/`)
       if (selectedChatId.value !== chatId) return

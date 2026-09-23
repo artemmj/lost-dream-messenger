@@ -230,6 +230,19 @@ const interlocutorOnline = computed(() => {
   return chatStore.onlineUsers.has(chat.interlocutor.id)
 })
 
+/**
+ * GROUP-чат: сколько участников сейчас в сети. Те же данные, что у точки личного
+ * чата: initial_presence при подключении сокета + user_status. Себя не считаем —
+ * «в сети» здесь про остальных.
+ */
+const onlineMembersCount = computed(() => {
+  const members = chatStore.currentChatDetails?.members
+  if (!isGroup.value || !members) return null
+  return members.filter(
+    (m) => m.id !== auth.user?.id && chatStore.onlineUsers.has(m.id),
+  ).length
+})
+
 async function handleSend() {
   const text = inputText.value.trim()
   if (!text || !chatStore.selectedChatId) return
@@ -300,11 +313,15 @@ async function handleDeleteChat() {
           </button>
           <div v-else class="chat-header-name">{{ currentChatName }}</div>
           <div v-if="interlocutorOnline !== null" class="presence-label">
-            <span
-              class="ws-dot"
-              :style="{ background: interlocutorOnline ? 'var(--color-success)' : '#bbb' }"
-            />
+            <span class="ws-dot presence-dot" :class="{ online: interlocutorOnline }" />
             {{ interlocutorOnline ? 'в сети' : 'не в сети' }}
+          </div>
+          <div v-else-if="onlineMembersCount !== null" class="presence-label">
+            <span
+              class="ws-dot presence-dot"
+              :class="{ online: onlineMembersCount > 0 }"
+            />
+            {{ onlineMembersCount ? `${onlineMembersCount} в сети` : 'все не в сети' }}
           </div>
         </div>
         <button v-if="isGroup" class="members-btn" @click="showMembers = true">

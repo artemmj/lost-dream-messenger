@@ -107,12 +107,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-MAILERS = {
-    "default": {
-        "BACKEND": "django.core.mail.backends.console.EmailBackend",
-    },
-}
-
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 
 # DRF-троттлинг хранит счётчики в кэше: LocMemCache дал бы отдельный лимит на

@@ -221,6 +221,13 @@ body {
   width: 8px; height: 8px; border-radius: 50%; display: inline-block;
 }
 
+/* Presence-точка: онлайн/оффлайн. Тот же маркер в шапке чата и в списке участников */
+.presence-dot { background: #bbb; flex: none; }
+.presence-dot.online { background: var(--color-success); }
+/* Точка внутри строки с именем — в .user-item-name она инлайн, а не флекс-элемент */
+.member-presence { margin-right: .35rem; vertical-align: middle; }
+.presence-summary { margin-bottom: .4rem; }
+
 /* Сокет закрыт сервером (WS-лимиты), а чат ещё выбран — чат продолжает
    работать через REST, поэтому предупреждение над историей, а не вместо неё */
 .connection-notice {

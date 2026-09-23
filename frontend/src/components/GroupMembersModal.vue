@@ -22,6 +22,21 @@ const details = computed(() => chatStore.currentChatDetails)
 const myIsAdmin = computed(() => !!details.value?.my_is_admin)
 const memberIds = computed(() => new Set((details.value?.members ?? []).map((m) => m.id)))
 
+const isOnline = (userId: string) => chatStore.onlineUsers.has(userId)
+
+// Без нас самих: «в сети» здесь про остальных — как и счётчик в шапке чата
+const others = computed(
+  () => (details.value?.members ?? []).filter((m) => m.id !== auth.user?.id),
+)
+
+/**
+ * Сколько участников в сети. Присутствие live: initial_presence при подключении
+ * сокета чата + user_status от остальных. Того, кого добавили уже после
+ * подключения, покажем офлайн до перезахода в чат — сервер анонсирует статус
+ * только на переходах 0→1 и 1→0.
+ */
+const onlineCount = computed(() => others.value.filter((m) => isOnline(m.id)).length)
+
 const search = useDebounceFn(async (q: string) => {
   if (!q.trim()) { users.value = []; return }
   isSearching.value = true
@@ -90,10 +105,20 @@ async function removeMember(userId: string) {
         <h3>Участники</h3>
         <div v-if="error" class="error-msg">{{ error }}</div>
 
+        <div v-if="others.length" class="presence-label presence-summary">
+          <span class="ws-dot presence-dot" :class="{ online: onlineCount > 0 }" />
+          {{ onlineCount ? `${onlineCount} в сети из ${others.length}` : 'никто из участников не в сети' }}
+        </div>
+
         <div class="user-list">
           <div v-for="m in details?.members ?? []" :key="m.id" class="user-item member-item">
             <div class="member-info">
               <div class="user-item-name">
+                <span
+                  class="ws-dot presence-dot member-presence"
+                  :class="{ online: isOnline(m.id) }"
+                  :title="isOnline(m.id) ? 'в сети' : 'не в сети'"
+                />
                 {{ m.first_name || m.phone }}
                 <span v-if="m.is_admin" class="member-badge admin">админ</span>
                 <span v-if="m.id === auth.user?.id" class="member-badge">вы</span>
