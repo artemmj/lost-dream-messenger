@@ -118,10 +118,19 @@ class ChatListSerializer(serializers.ModelSerializer):
 
     last_message = serializers.SerializerMethodField()
     interlocutor = serializers.SerializerMethodField()  # Для личных чатов
+    unread_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Chat
-        fields = ("id", "type", "name", "created_at", "last_message", "interlocutor")
+        fields = (
+            "id",
+            "type",
+            "name",
+            "created_at",
+            "last_message",
+            "interlocutor",
+            "unread_count",
+        )
 
     @extend_schema_field(MessageSerializer)
     def get_last_message(self, obj):
@@ -129,6 +138,13 @@ class ChatListSerializer(serializers.ModelSerializer):
         if hasattr(obj, "last_msg_list") and obj.last_msg_list:
             return MessageSerializer(obj.last_msg_list[0]).data
         return None
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_unread_count(self, obj):
+        # Счётчики считает вьюха одной агрегатной выборкой на всю страницу и
+        # кладёт в context: аннотировать сам queryset нельзя, там уже .distinct()
+        # вместе с Prefetch — вторая join-агрегация размножила бы строки.
+        return self.context.get("unread_counts", {}).get(str(obj.id), 0)
 
     @extend_schema_field(UserSerializer)
     def get_interlocutor(self, obj):

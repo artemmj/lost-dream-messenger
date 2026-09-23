@@ -30,6 +30,7 @@ export interface ChatListItem {
   created_at: string
   last_message: Message | null
   interlocutor: User | null
+  unread_count: number
 }
 
 export interface ChatDetails {
@@ -87,6 +88,46 @@ export const useChatStore = defineStore('chat', () => {
       console.error('loadMessages:', e)
     }
     loadChatDetails(chatId)
+    markRead(chatId)
+  }
+
+  /** Сдвигаем курсор прочтения на сервере и убираем бейдж. */
+  async function markRead(chatId: string) {
+    try {
+      await api.post(`/chats/${chatId}/read/`)
+      setUnread(chatId, 0)
+    } catch (e) {
+      console.error('markRead:', e)
+    }
+  }
+
+  /**
+   * Бейдж непрочитанного. Чата может не быть в списке — например нас только что
+   * добавили в группу: тогда перечитываем список, счётчик придёт с ним.
+   */
+  function setUnread(chatId: string, count: number) {
+    const chat = chats.value.find((c) => c.id === chatId)
+    if (!chat) {
+      loadChats()
+      return
+    }
+    chat.unread_count = count
+  }
+
+  /**
+   * Уведомление из личного канала: обновляем превью и счётчик.
+   * Если этот чат открыт на видимой вкладке, сообщение уже прочитано — тут же
+   * подтверждаем это серверу (он разнесёт chat_read по остальным вкладкам).
+   */
+  function applyNewMessage(message: Message, unreadCount: number) {
+    const chatId = message.chat
+    if (chatId === selectedChatId.value && document.visibilityState === 'visible') {
+      markRead(chatId)
+    } else {
+      setUnread(chatId, unreadCount)
+    }
+    const chat = chats.value.find((c) => c.id === chatId)
+    if (chat) chat.last_message = message
   }
 
   async function loadChatDetails(chatId: string) {
@@ -217,6 +258,9 @@ export const useChatStore = defineStore('chat', () => {
     wsStatus,
     loadChats,
     selectChat,
+    markRead,
+    setUnread,
+    applyNewMessage,
     loadChatDetails,
     loadOlderMessages,
     reloadMessages,

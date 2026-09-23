@@ -42,6 +42,8 @@ function getChatName(chat: any): string {
   if (chat.interlocutor) return chat.interlocutor.first_name || chat.interlocutor.phone
   return chat.type === 'GROUP' ? 'Групповой чат' : 'Личный чат'
 }
+
+const formatUnread = (n: number) => (n > 99 ? '99+' : String(n))
 </script>
 
 <template>
@@ -65,11 +67,12 @@ function getChatName(chat: any): string {
         v-for="chat in chatStore.chats"
         :key="chat.id"
         class="chat-item"
-        :class="{ active: chatStore.selectedChatId === chat.id }"
+        :class="{ active: chatStore.selectedChatId === chat.id, unread: chat.unread_count > 0 }"
         @click="chatStore.selectChat(chat.id)"
       >
         <div class="chat-item-name">{{ getChatName(chat) }}</div>
         <div class="chat-item-preview">{{ chat.last_message?.text || 'Нет сообщений' }}</div>
+        <span v-if="chat.unread_count > 0" class="unread-badge">{{ formatUnread(chat.unread_count) }}</span>
       </div>
       <div v-if="chatStore.chats.length === 0" style="padding:1rem;color:#999;text-align:center">
         Нет чатов

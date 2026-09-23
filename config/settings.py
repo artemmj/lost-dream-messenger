@@ -146,6 +146,8 @@ REST_FRAMEWORK = {
         "auth": "10/min",  # login/refresh: анонимные, ключ — IP
         "register": "5/min",
         "send": "60/min",
+        # Отметка прочтения вызывается при каждом открытии/фокусе чата
+        "read": "120/min",
         "write": "30/min",
         "search": "20/min",
         "schema": "30/hour",

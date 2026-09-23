@@ -1,6 +1,7 @@
 import uuid
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.utils import timezone
 
 from config import settings
 
@@ -118,6 +119,12 @@ class Membership(models.Model):
     chat = models.ForeignKey(Chat, on_delete=models.CASCADE)
     joined_at = models.DateTimeField(auto_now_add=True)
     is_admin = models.BooleanField(default=False)
+    # Курсор прочтения: непрочитанными считаются сообщения чата, созданные позже.
+    # default вместо null=True — миграция заполняет существующие строки «сейчас»,
+    # иначе сайдбар после выгрузки курса вспыхнет всеми старыми сообщениями.
+    last_read_at = models.DateTimeField(
+        default=timezone.now, verbose_name="Прочитано до"
+    )
 
     class Meta:
         unique_together = ("user", "chat")

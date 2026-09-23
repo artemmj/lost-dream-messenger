@@ -18,12 +18,13 @@ lost-dream-messenger/
 │   ├── models.py                  # User, Chat, Membership, Message + кастомный UserManager
 │   ├── serializers.py             # DRF-сериалайзеры + Swagger-аннотации
 │   ├── views.py                   # ChatViewSet, RegisterView, LoginView/RefreshView/SchemaView, UserSearchView, MeView
-│   ├── consumers.py               # ChatConsumer (AsyncJsonWebsocketConsumer) + message_payload() + WS-лимиты
+│   ├── consumers.py               # ChatConsumer + NotificationConsumer (AsyncJsonWebsocketConsumer), message_payload(), publish_*
 │   ├── activity.py                # touch_last_seen() — обновление last_seen с троттлингом 60 с
 │   ├── middleware.py              # LastSeenMiddleware — активность на авторизованных REST-запросах
 │   ├── ratelimit.py               # RedisWindowLimiter (Lua INCR+PEXPIRE) + лимиты WS: сообщения, подключения, кап сессий
+│   ├── readstate.py               # unread_counts() / unread_counts_per_user() — непрочитанное по курсору Membership.last_read_at
 │   ├── ws_auth.py                 # JWT-аутентификация для WebSocket (token из query string)
-│   ├── routing.py                 # WebSocket URL patterns
+│   ├── routing.py                 # WebSocket URL patterns: ws/chat/<id>/ и ws/notifications/
 │   ├── admin.py                   # Django Admin с inlines (Membership, последние сообщения)
 │   ├── urls.py                    # DefaultRouter (chats) + auth/users/schema/docs
 │   ├── migrations/
@@ -37,10 +38,10 @@ lost-dream-messenger/
     ├── src/
     │   ├── assets/styles.css      # Глобальные стили (CSS variables)
     │   ├── components/            # ChatSidebar, ChatWindow, MessageBubble, NewChatModal, GroupMembersModal
-    │   ├── composables/           # useChatSocket — WS-подключение, reconnect, отправка
-    │   ├── stores/                # Pinia: auth.ts (JWT, профиль), chat.ts (чаты, сообщения)
+    │   ├── composables/           # useChatSocket (сокет чата) и useNotificationsSocket (личный канал) — WS, reconnect, отправка
+    │   ├── stores/                # Pinia: auth.ts (JWT, профиль), chat.ts (чаты, сообщения, непрочитанное, presence)
     │   ├── services/api.ts        # Axios instance + interceptors (Bearer, авто-refresh при 401)
-    │   ├── views/                 # LoginView, ChatView
+    │   ├── views/                 # LoginView, ChatView (здесь же монтируется личный WS-канал)
     │   ├── router/index.ts        # Vue Router + navigation guard (requiresAuth)
     │   ├── App.vue                # При старте догружает профиль через /auth/me/
     │   └── main.ts
@@ -75,13 +76,18 @@ lost-dream-messenger/
 | Кап одновременных WS-соединений через presence-хеш | `messenger:presence` уже считает активные соединения пользователя — отдельный счётчик не заводим |
 | `MESSAGE_LIMITER` = 10/10 с, как REST-scope `send` | Иначе лимит обходится уходом в REST-fallback после закрытия сокета |
 | `ScopedRateThrottle` в глобальных `DEFAULT_THROTTLE_CLASSES` | Без `throttle_scope` на view он пропускает запрос — точечный лимит добавляется одной строкой, а не переопределением `throttle_classes` в каждой вьюхе |
+| Прочтение — курсор `Membership.last_read_at`, не read-receipt на сообщение | Одна строка на участника и один запрос на все чаты против `ChatRead` на пару (сообщение, пользователь); минус — нельзя показать «прочитано на таком-то сообщении», для бейджа это не нужно |
+| Уведомления — отдельный личный WS-канал `ws/notifications/`, а не «вечный» сокет чата | Сокет чата живёт, пока чат открыт: сообщение в другой чат доставлять не через что. Плюс у канала есть адресат для `chat_read`/`chat_deleted`, которых у чата нет (сокет закрыт), и общий на оба канала бюджет подключений |
+| Presence и `last_seen` переехали на личный канал | Иначе закрытие чата (Esc/крестик) анонсировало «offline», хотя пользователь ещё в приложении; сокет чата теперь только читает presence-хеш для `initial_presence` |
+| `user_status` анонсируется во все группы чатов пользователя | У presence-события нет «дома» — точку онлайн рисуют шапки личных чатов, а их несколько; переход 0→1 и 1→0 редок, поэтому веер по N группам дешевле отдельной индексации |
 
 ## 📦 Модели данных
 
-- **User** (`AbstractUser` + UUID PK): `phone` (unique, USERNAME_FIELD), `email`/`first_name`/`last_name` (опциональные), `last_seen` (обновляется при WS connect/disconnect, при отправке сообщения в WS и на любом авторизованном REST-запросе — с троттлингом 60 с). Кастомный `UserManager` нормализует телефон (оставляет цифры и `+`).
+- **User** (`AbstractUser` + UUID PK): `phone` (unique, USERNAME_FIELD), `email`/`first_name`/`last_name` (опциональные), `last_seen` (обновляется при подключении и отключении личного WS-канала `ws/notifications/`, при отправке сообщения в WS и на любом авторизованном REST-запросе — с троттлингом 60 с). Кастомный `UserManager` нормализует телефон (оставляет цифры и `+`).
 - **Chat**: `type` (PRIVATE/GROUP), `name` (для групп), `members` M2M через Membership, ordering `-created_at`.
-- **Membership**: user ↔ chat, `is_admin`, unique constraint `unique_user_chat` (продублирован legacy `unique_together`).
+- **Membership**: user ↔ chat, `is_admin`, `last_read_at` (курсор прочтения, см. ниже), unique constraint `unique_user_chat` (продублирован legacy `unique_together`).
 - **Message**: `chat` FK, `sender` FK, `text` (≤5000), `created_at`, `is_read` (глобальный флаг на сообщение, не per-user), index `(chat, created_at)`, ordering `created_at`.
+- **Курсор прочтения** (`Membership.last_read_at`, `default=timezone.now`): непрочитанными считаются сообщения чата, созданные позже этой отметки и не от самого пользователя. Считает единственная функция `messenger/readstate.py::unread_counts(user, chat_ids)` — один запрос на весь список чатов (`Count(..., filter=Q(created_at__gt=F("last_read_at")) & ~Q(sender=user))`, условие ложится на индекс `(chat, created_at)`). `default`, а не `null=True`: миграция заполняет старые строки «сейчас», поэтому после выгрузки курса сайдбар не вспыхнет всеми архивными сообщениями, а новый участник группы стартует «прочитано». `Message.is_read` курсор не заменяет — по-прежнему глобальный флаг, галочку ✓✓ не трогает.
 
 ## 🔌 REST API (префикс `/api/v1/`)
 
@@ -91,13 +97,14 @@ lost-dream-messenger/
 | POST | `/auth/login/` | JWT token pair (поле `phone`, не `username`) |
 | POST | `/auth/refresh/` | Refresh access token |
 | GET | `/auth/me/` | Профиль текущего пользователя (по JWT) |
-| GET | `/chats/` | Мои чаты с `last_message` и `interlocutor` (для PRIVATE), пагинация (50) |
+| GET | `/chats/` | Мои чаты с `last_message`, `interlocutor` (для PRIVATE) и `unread_count` (по курсору прочтения), пагинация (50) |
 | POST | `/chats/` | Создать чат (создатель — админ; для GROUP обязателен `name`, можно передать `member_ids` — участники добавляются атомарно в транзакции; ответ — формат ChatDetail) |
 | GET | `/chats/{id}/` | Детали чата: `members` с флагом `is_admin` у каждого + `my_is_admin` текущего пользователя |
 | DELETE | `/chats/{id}/` | Удалить чат вместе с сообщениями: GROUP — только админ чата, PRIVATE — любой участник; остальным участникам приходит WS-закрытие 4004 |
 | POST | `/chats/private/` | Создать/найти личный чат (идемпотентно: если PRIVATE-чат, где состоят оба пользователя, уже есть — вернёт его с 200, иначе создаст с 201). Внутри `transaction.atomic()` строки обоих пользователей берутся в `select_for_update` (порядок по `id`) — параллельные запросы пары не создают дубликаты |
 | GET | `/chats/{id}/messages/` | История: страница 1 = **последние** 50 сообщений (сортировка `-created_at`), внутри страницы — по возрастанию времени |
 | POST | `/chats/{id}/send/` | Отправить сообщение (REST fallback) + broadcast в WS-группу `chat_{id}` |
+| POST | `/chats/{id}/read/` | Отметить чат прочитанным: сдвигает `Membership.last_read_at` участника на «сейчас», ответ `{"unread_count": 0}`. Не-участник → 404 (queryset списка чатов уже отфильтрован по участников) |
 | POST | `/chats/{id}/add-member/` | Добавить участника (только админ, **только GROUP-чаты**) |
 | POST | `/chats/{id}/remove-member/` | Удалить участника / выйти самому; нельзя удалить единственного админа; опустевший чат удаляется |
 | GET | `/users/search/?q=` | Поиск по телефону/first_name/last_name, исключает себя, лимит 20 |
@@ -123,6 +130,7 @@ lost-dream-messenger/
 | `auth` | 10/min | `LoginView`, `RefreshView` | IP |
 | `register` | 5/min | `RegisterView` | IP |
 | `send` | 60/min | `ChatViewSet.ACTION_THROTTLE_SCOPES["send_message"]` | user id |
+| `read` | 120/min | `ChatViewSet.ACTION_THROTTLE_SCOPES["mark_read"]` — отметка прочтения вызывается при каждом открытии/фокусе вкладки | user id |
 | `write` | 30/min | `create`, `create_private`, `add_member`, `remove_member`, `destroy` | user id |
 | `search` | 20/min | `UserSearchView` | user id |
 | `schema` | 30/hour | `SchemaView` | IP |
@@ -147,7 +155,7 @@ DRF-троттлинг до Channels-consumer'ов не дотягивается
 
 `MESSAGE_LIMITER` намеренно того же порядка, что REST-scope `send` (60/min) — иначе лимит обходится уходом в REST-fallback. Считается **до** валидации текста, чтобы мусором его не выжигать; при превышении дорогие части (запись в БД, broadcast всей группе) просто не выполняются, поэтому сокет не закрываем — эскалация потребовала бы reconnect-пластинки в UI ради выгоды, которой нет.
 
-`CONNECT_LIMITER` и кап одновременных соединений проверяются в `connect()` **до** `accept()` и до `_presence_enter()` — отказ не должен сдвигать состояние «онлайн». Кап читается из уже существующего presence-счётчика (`HGET`), отдельного учёта не заводим; гонка «два соединения прошли кап» для ограничения неважна, а откат инкремента пришлось бы синхронизировать с `disconnect()`.
+`CONNECT_LIMITER` и кап одновременных соединений проверяются в `connect()` **до** `accept()`. У сокета чата они только читают состояние (presence-счётчик ведёт канал уведомлений, поэтому отказ в сокете чата ничего не сдвигает); в канале уведомлений отказ происходит до инкремента — иначе отказ с откатом пришлось бы синхронизировать с `disconnect()`, который декрементит сам. Кап читается из уже существующего presence-счётчика (`HGET`), отдельного учёта не заводим; гонка «два соединения прошли кап» для ограничения неважна.
 
 Daphne дополнительно ограничивает размер кадра: `--websocket-max-message-size 16384` в команде сервиса `backend` (дефолт 1 MiB). nginx в prod держит `limit_req` на `/api/` и `limit_conn` на `/ws/` (см. «🐳 Инфраструктура»).
 
@@ -155,9 +163,10 @@ Daphne дополнительно ограничивает размер кадр
 
 | Endpoint | Protocol | Description |
 |----------|----------|-------------|
-| `ws/chat/<uuid>/?token=<jwt>` | WS | Real-time чат (regex допускает только hex+дефисы) |
+| `ws/chat/<uuid>/?token=<jwt>` | WS | Real-time одного чата (regex допускает только hex+дефисы) |
+| `ws/notifications/?token=<jwt>` | WS | Личный канал пользователя: уведомления по всем его чатам + presence/`last_seen` |
 
-**События сервер → клиент:**
+**События чата (сервер → клиент), канал `ws/chat/`:**
 
 | type | Payload | Описание |
 |------|---------|----------|
@@ -173,21 +182,38 @@ Daphne дополнительно ограничивает размер кадр
 |------|---------|----------|
 | *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке, затем анти-флуд (`MESSAGE_LIMITER`), `last_seen` отправителя обновляется с троттлингом 60 с |
 
-**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → лимит частоты подключений (`CONNECT_LIMITER`, отказ 4029) → кап одновременных соединений (presence-счётчик, отказ 4009) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → presence: `HINCRBY messenger:presence {user_id} 1`, broadcast `user_status: online` **только при счётчике 1** → отправка `initial_presence` подключившемуся клиенту.
+**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → лимит частоты подключений (`CONNECT_LIMITER`, отказ 4029) → кап одновременных соединений (presence-счётчик, отказ 4009) → проверка membership → отказ не-участникам (4003) → `group_add("chat_{id}")` + `accept` → отметка чужих непрочитанных как прочитанных (глобальный `Message.is_read`, для галочки ✓✓) + broadcast `messages_read` → отправка `initial_presence` подключившемуся клиенту.
 
-**Поведение при отключении:** `HINCRBY -1`; broadcast `user_status: offline` и обновление `last_seen` — **только при счётчике 0** (учитывается несколько вкладок/устройств). Если соединение закрыто до accept (4001/4003/4009/4029), счётчик не трогается.
+**Поведение при отключении:** только `group_discard`. Presence и `last_seen` сокет чата не трогает — см. ниже (закрытие чата через Esc/крестик не «выключает» пользователя).
 
-**Удаление участника:** REST `remove-member` шлёт в группу событие `member.removed` — consumer удалённого пользователя закрывает его сокет с кодом 4003 (фронт по этому коду убирает чат из списка).
+**События личного канала (сервер → клиент), канал `ws/notifications/`:**
 
-**Удаление чата:** REST `DELETE /chats/{id}/` шлёт в группу событие `chat.deleted` — все consumer'ы закрывают сокеты с кодом 4004 (фронт убирает чат из списка и показывает «Чат удалён»).
+| type | Payload | Описание |
+|------|---------|----------|
+| `new_message` | `{chat, message: {...как в чате...}, unread_count}` | Сообщение в **любом** чате пользователя. `unread_count` считает сервер по курсору получателя — клиент своё не хранит |
+| `chat_read` | `{chat}` | Курсор прочтения сдвинут (POST `/chats/{id}/read/`) — убрать бейдж в других вкладках/устройствах |
+| `chat_deleted` | `{chat}` | Чат удалён — убрать из списка, даже когда его сокет был закрыт |
+| `member_removed` | `{chat}` | Пользователя удалили из чата — убрать из списка |
+
+Отправлять в этот канал нечего: `receive()` — no-op, только читает.
+
+**Поведение при подключении (личный канал):** JWT (4001) → `CONNECT_LIMITER` (4029) → кап соединений (4009) → `accept` → `last_seen` → presence `HINCRBY messenger:presence {user_id} 1`, и **только при счётчике 1** — `user_status: online` во **все** группы чатов пользователя. Кап и лимит общие с сокетом чата: бюджет `messenger:rl:conn:{user_id}` и счётчик presence одни на оба канала, то есть «вкладка с открытым чатом» = 2 соединения из 5.
+
+**Поведение при отключении (личный канал):** presence `HINCRBY -1`; при счётчике 0 — `last_seen` и `user_status: offline` во все группы чатов. Отказ до `accept` счётчик не трогает.
+
+**Уведомления о новом сообщении** рассылаются из `publish_new_message(message)` — её вызывают обе точки создания сообщения (`ChatConsumer.receive_json` и REST `POST /chats/{id}/send/`). Получатели — участники, кроме отправителя, каждому в свою группу `user_{uid}`; счётчик на каждого свой, поэтому это N адресных `group_send`, а не один broadcast в группу чата, и считает его одна агрегатная выборка `unread_counts_per_user`.
+
+**Удаление участника:** REST `remove-member` шлёт `member.removed` в группу чата (consumer удалённого закрывает его сокет с 4003) и в его личный канал (фронт убирает чат из списка).
+
+**Удаление чата:** REST `DELETE /chats/{id}/` шлёт `chat.deleted` в группу чата (все её сокеты закрываются с 4004) и в личные каналы участников.
 
 **Коды закрытия:**
 
 | Code | Причина |
 |------|---------|
-| 4001 | Невалидный/отсутствующий JWT |
-| 4003 | Пользователь не участник чата (в т.ч. удалён из чата во время сессии) |
-| 4004 | Чат удалён |
+| 4001 | Невалидный/отсутствующий JWT (оба канала) |
+| 4003 | Пользователь не участник чата (в т.ч. удалён из чата во время сессии) — сокет чата |
+| 4004 | Чат удалён — сокет чата |
 | 4009 | Превышен кап одновременных соединений (`MAX_CONNECTIONS_PER_USER`) |
 | 4029 | Превышена частота подключений (`CONNECT_LIMITER`) за окно |
 
@@ -196,11 +222,13 @@ Daphne дополнительно ограничивает размер кадр
 ## 🖥 Frontend (Vue 3 SPA)
 
 - **auth.ts (Pinia)**: login/register сохраняют токены в localStorage и грузят профиль через `/auth/me/`; `getUserFromToken()` при перезагрузке восстанавливает из JWT только `id` (payload не содержит имени/телефона), полный профиль догружает `App.vue` в `onMounted`. Logout — только очистка localStorage.
-- **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (первая страница сообщений + `loadChatDetails()`), `loadOlderMessages()` (prepend следующей страницы; состояние `messagesPage`/`hasMoreMessages`/`isLoadingHistory`; guard от смены чата во время запроса), `reloadMessages()` (перечитывание первой страницы после WS-reconnect: если вернулась полная страница (`MESSAGES_PAGE_SIZE = 50`) — история перезагружается целиком, иначе новые сообщения добираются в хвост, а у уже известных обновляется `is_read`), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`, `removeChat()` (чат исчез для нас — удаление/вылет), `closeChat()` (только снять выделение и очистить окно: крестик в шапке и Esc; WS закрывается сам через watch на `selectedChatId`; используется и при logout). Presence: `onlineUsers` (Set id) + `setUserStatus()`/`setInitialPresence()`. Состояние WS: `wsStatus` (`WsStatus`, тип экспортируется и используется в useChatSocket) + `setWsStatus()` — пишет ChatWindow, отображает ChatSidebar; сбрасывается в `disconnected` в `closeChat()`.
+- **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (первая страница сообщений + `loadChatDetails()` + `markRead()`), `markRead(chatId)` (`POST /chats/{id}/read/`, при успехе обнуляет бейдж; при ошибке счётчик остаётся серверным), `setUnread(chatId, n)` (если чата в списке нет — нас только что добавили: перечитываем `loadChats()`), `applyNewMessage(message, unreadCount)` (превью + бейдж; если этот чат открыт на видимой вкладке — сразу подтверждаем прочтение через `markRead`, иначе ставим серверный счётчик), `loadOlderMessages()` (prepend следующей страницы; состояние `messagesPage`/`hasMoreMessages`/`isLoadingHistory`; guard от смены чата во время запроса), `reloadMessages()` (перечитывание первой страницы после WS-reconnect: если вернулась полная страница (`MESSAGES_PAGE_SIZE = 50`) — история перезагружается целиком, иначе новые сообщения добираются в хвост, а у уже известных обновляется `is_read`), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`, `removeChat()` (чат исчез для нас — удаление/вылет), `closeChat()` (только снять выделение и очистить окно: крестик в шапке и Esc; WS закрывается сам через watch на `selectedChatId`; используется и при logout). Presence: `onlineUsers` (Set id) + `setUserStatus()`/`setInitialPresence()`. Состояние WS: `wsStatus` (`WsStatus`, тип экспортируется и используется в useChatSocket) + `setWsStatus()` — пишет ChatWindow, отображает ChatSidebar; сбрасывается в `disconnected` в `closeChat()`. `ChatListItem.unread_count` приходит из REST и обновляется из личного канала.
 - **api.ts**: axios с Bearer-interceptor; при 401 — один retry через `/auth/refresh/`, при неудаче — очистка токенов и редирект на `/login`.
 - **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c, кроме кодов из `NO_RECONNECT_CODES` (4001/4003/4004 — доступ, 4009/4029 — WS-лимиты: переподключение только продлевает бан), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onError(message)` (сервер отклонил событие, сокет жив), `onClose(code)`, `onReconnect()`. Все хэндлеры сокета проверяют `ws !== socket` — события соединения, закрытого при смене чата, игнорируются. Флаг `hadConnection` отличает reconnect от первого подключения (сбрасывается в watch на `chatId`; считается установленным и после неудачного соединения, поэтому пропущенные сообщения добираются и при первом подключении со второй попытки).
+- **useNotificationsSocket.ts**: личный канал `ws/notifications/`, монтируется в `ChatView.vue`. Только читает: `new_message`/`chat_read`/`chat_deleted`/`member_removed` → колбэки в store. Reconnect через фиксированные 2 c, кроме `NO_RECONNECT_CODES` (общий набор экспортирует `useChatSocket`); при 4001 (истёкший JWT) канал молчит до момента, когда вкладка снова станет видимой — `visibilitychange` поднимает соединение со свежим токеном из localStorage. Обрыв после сна/4001 — тот же путь. Хэндлеры проверяют `ws !== socket`.
+- **ChatView.vue**: монтирует сайдбар + окно чата, в `onMounted` — `loadChats()`, личный канал уведомлений и `visibilitychange`: возврат во вкладку с выбранным чатом = `markRead()` (всё пришедшее в отсутствие считается прочитанным).
 - **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input, а `detail` ответа — в строку `.send-error` над полем ввода, туда же уходит и 429 от REST-scope `send`); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) и крестик `×` справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; `CLOSE_NOTICES` — плашка по коду закрытия: 4003/4004 (`FORGET_CHAT_CODES`) убирают чат из списка через `removeChat()` и показываются в empty-state, 4009/4029 оставляют чат выбранным (участник-то остался) и показываются баннером `.connection-notice` под шапкой; `onError` пишет текст отказа в `sendError`; по `onReconnect` — `reloadMessages()` + `loadChats()` (прокрутку к новым сообщениям выполняет watcher по `lastMessageId`). Esc закрывает текущий чат (`closeChat()`), но уступает модалкам: если в DOM висит `.modal-overlay`, клавиша не трогает ничего — состояние модалок живёт в соседних компонентах, а их собственные обработчики навешаны на тот же `window`.
-- **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
+- **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения + круглый бейдж непрочитанного в углу пункта, `99+` на больших числах; при `unread_count > 0` имя подсвечивается и утолщается), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
 - **GroupMembersModal.vue**: список участников (бейджи «админ»/«вы»); админ — debounced-поиск и добавление (`POST add-member/`), удаление любого (`POST remove-member/`); любой участник — «Выйти» (выход из чата, при опустевшем чате сервер его удаляет). Esc и клик по оверлею закрывают модалку, чат под ней остаётся открытым.
 - **NewChatModal.vue**: режимы «Личный / Групповой». Личный: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка + **автовыбор** чата. Групповой: название + мультивыбор пользователей из поиска (chips) → `POST /chats/ {type, name, member_ids}` → автовыбор. Esc и клик по оверлею закрывают модалку.
 - **LoginView.vue**: вход и регистрация в одной форме. Email/имя/фамилия необязательны — пустые значения вырезаются из payload перед `POST /auth/register/` (бэкенд трактует `""` как невалидный email).
@@ -250,6 +278,7 @@ docker compose down -v && docker compose up --build -d
 - [x] Добавление/удаление участников группового чата из UI (GroupMembersModal, выход из чата, live-закрытие сокета удалённого участника)
 - [x] Пагинация сообщений в UI (infinite scroll вверх с якорем позиции)
 - [x] Перечитывание истории после WS-reconnect
+- [x] Счётчик непрочитанного в списке чатов (курсор `Membership.last_read_at`, `unread_count` в REST, личный WS-канал `ws/notifications/`, бейдж в сайдбаре)
 - [ ] Удаление чата из UI (бэкенд `DELETE /chats/{id}/` с правами и WS-закрытием 4004 готов, на фронте нет кнопки)
 - [ ] Переименование GROUP-чата (нужен PATCH/PUT или отдельный action — сейчас `http_method_names` без них)
 - [ ] Typing indicators («печатает...»)
@@ -276,7 +305,7 @@ docker compose down -v && docker compose up --build -d
 1. **SECRET_KEY и DEBUG захардкожены** в `settings.py`; `DJANGO_SECRET_KEY`/`DJANGO_DEBUG` из `.env.example` **не читаются** — перед деплоем перевести на env.
 2. **Rate limiting не покрывает `/admin/`** — DRF-троттлинг работает только на DRF-view'ах, Django Admin не ограничен ничем; WS-лимитеры в `ChatConsumer` есть, но nginx-слой с `limit_req`/`limit_conn` исполняется только на prod-таргете фронтенда (в compose поднят `dev`).
 3. **Нет тестов** — покрытие 0% (backend + frontend).
-4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
+4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех. Частично закрыто: бейдж непрочитанного считается по per-user курсору `Membership.last_read_at`, но галочка ✓✓ по-прежнему опирается на глобальный флаг — read-receipt на пару (сообщение, пользователь) не заводили.
 5. **Нет soft-delete** — удаление чата/сообщения физическое.
 6. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
 7. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.

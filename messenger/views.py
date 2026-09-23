@@ -5,6 +5,7 @@ from channels.layers import get_channel_layer
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Prefetch
+from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from drf_spectacular.views import SpectacularAPIView
 from rest_framework import generics, permissions, status, viewsets
@@ -15,8 +16,9 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from .consumers import message_payload
+from .consumers import message_payload, publish_new_message, publish_to_users
 from .models import Chat, Membership, Message
+from .readstate import unread_counts
 from .serializers import (
     AddMemberSerializer,
     ChatCreateSerializer,
@@ -63,6 +65,7 @@ class ChatViewSet(viewsets.ModelViewSet):
         "add_member": "write",
         "remove_member": "write",
         "destroy": "write",
+        "mark_read": "read",
     }
 
     def get_throttles(self):
@@ -94,6 +97,22 @@ class ChatViewSet(viewsets.ModelViewSet):
         elif self.action == "create":
             return ChatCreateSerializer
         return ChatDetailSerializer
+
+    def list(self, request, *args, **kwargs):
+        """Стандартный list + счётчики непрочитанного одной выборкой на страницу."""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        chats = list(page) if page is not None else list(queryset)
+
+        context = {
+            **self.get_serializer_context(),
+            "unread_counts": unread_counts(request.user, [c.id for c in chats]),
+        }
+        serializer = ChatListSerializer(chats, many=True, context=context)
+
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -146,13 +165,15 @@ class ChatViewSet(viewsets.ModelViewSet):
                 return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
 
         chat_id = chat.id
+        member_ids = list(chat.members.values_list("id", flat=True))
         chat.delete()
 
         channel_layer = get_channel_layer()
-        async_to_sync(channel_layer.group_send)(
-            f"chat_{chat_id}",
-            {"type": "chat.deleted", "chat_id": str(chat_id)},
-        )
+        event = {"type": "chat.deleted", "chat_id": str(chat_id)}
+        async_to_sync(channel_layer.group_send)(f"chat_{chat_id}", event)
+        # И в личные группы: бейдж непрочитанного должен исчезнуть, даже когда
+        # сокет этого чата не открыт.
+        publish_to_users(member_ids, event)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -255,10 +276,39 @@ class ChatViewSet(viewsets.ModelViewSet):
             {"type": "chat.message", "message": message_payload(message)},
         )
 
+        # Уведомления — в личные группы участников (своим счётчиком непрочитанного)
+        async_to_sync(publish_new_message)(message)
+
         return Response(
             MessageSerializer(message, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @extend_schema(
+        summary="Отметить чат прочитанным",
+        description=(
+            "Сдвигает курсор прочтения текущего участника на «сейчас» — счётчик "
+            "непрочитанного в этом чате обнуляется."
+        ),
+        responses={
+            200: OpenApiResponse(description="Курсор обновлён"),
+            404: OpenApiResponse(description="Чат не найден или вы не участник"),
+        },
+        tags=["Chats"],
+    )
+    @action(detail=True, methods=["post"], url_path="read")
+    def mark_read(self, request, pk: UUID = None):
+        # get_object() уже ограничен queryset'ом «чаты пользователя» — вне чата 404
+        chat = self.get_object()
+        Membership.objects.filter(chat=chat, user=request.user).update(
+            last_read_at=timezone.now()
+        )
+        # Другие вкладки/устройства этого пользователя должны убрать бейдж
+        publish_to_users(
+            [request.user.id],
+            {"type": "chat.read", "chat": str(chat.id)},
+        )
+        return Response({"unread_count": 0})
 
     @extend_schema(
         summary="Добавить участника в чат",
@@ -361,10 +411,14 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         # Уведомляем WS-группу: consumer удалённого пользователя закроет его сокет (4003)
         channel_layer = get_channel_layer()
-        async_to_sync(channel_layer.group_send)(
-            f"chat_{chat.id}",
-            {"type": "member.removed", "user_id": str(user_to_remove_id)},
-        )
+        event = {
+            "type": "member.removed",
+            "user_id": str(user_to_remove_id),
+            "chat_id": str(chat.id),
+        }
+        async_to_sync(channel_layer.group_send)(f"chat_{chat.id}", event)
+        # И в личный канал: бейдж чата надо снять даже при закрытом сокете чата
+        publish_to_users([user_to_remove_id], event)
 
         # Если в чате не осталось участников — удаляем сам чат
         if not Membership.objects.filter(chat=chat).exists():
