@@ -313,8 +313,7 @@ docker compose down -v && docker compose up --build -d
 2. **Rate limiting не покрывает `/admin/`** — DRF-троттлинг работает только на DRF-view'ах, Django Admin не ограничен ничем; WS-лимитеры в `ChatConsumer` есть, но nginx-слой с `limit_req`/`limit_conn` исполняется только на prod-таргете фронтенда (в compose поднят `dev`).
 3. **Нет тестов** — покрытие 0% (backend + frontend).
 4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех. Частично закрыто: бейдж непрочитанного считается по per-user курсору `Membership.last_read_at`, но галочка ✓✓ по-прежнему опирается на глобальный флаг — read-receipt на пару (сообщение, пользователь) не заводили.
-5. **Нет soft-delete** — удаление чата/сообщения физическое.
-6. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
-7. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
-8. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
-9. **`create_private` полагается на `select_for_update`** — защита от дубликатов работает только на Postgres; на SQLite (например, в будущих тестах) запрос упадёт с `NotSupportedError`.
+5. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
+6. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
+7. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
+8. **`create_private` полагается на `select_for_update`** — защита от дубликатов работает только на Postgres; на SQLite (например, в будущих тестах) запрос упадёт с `NotSupportedError`.
