@@ -2,32 +2,32 @@ from uuid import UUID
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from django.db.models import Count, Prefetch
 from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.db.models import Prefetch
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
-from rest_framework import viewsets, permissions, status, generics
-from rest_framework.response import Response
+from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .consumers import message_payload
+from .models import Chat, Membership, Message
 from .serializers import (
     AddMemberSerializer,
+    ChatCreateSerializer,
+    ChatDetailSerializer,
+    ChatListSerializer,
+    MeSerializer,
+    MessageCreateSerializer,
+    MessageSerializer,
     PrivateChatCreateSerializer,
-    RegisterSerializer,
     RegisterResponseSerializer,
+    RegisterSerializer,
     RemoveMemberSerializer,
     UserSerializer,
-    MeSerializer,
-)
-from .models import Chat, Message, Membership
-from .serializers import (
-    ChatListSerializer,
-    ChatDetailSerializer,
-    MessageSerializer,
-    MessageCreateSerializer,
 )
 
 User = get_user_model()
@@ -73,13 +73,35 @@ class ChatViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == "list":
             return ChatListSerializer
-        elif self.action == "retrieve":
-            return ChatDetailSerializer
+        elif self.action == "create":
+            return ChatCreateSerializer
         return ChatDetailSerializer
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            ChatDetailSerializer(
+                serializer.instance, context={"request": request}
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
     def perform_create(self, serializer):
-        chat = serializer.save()
-        Membership.objects.create(user=self.request.user, chat=chat, is_admin=True)
+        member_ids = serializer.validated_data.pop("member_ids", [])
+        with transaction.atomic():
+            chat = serializer.save()
+            Membership.objects.create(user=self.request.user, chat=chat, is_admin=True)
+            others = [uid for uid in member_ids if uid != self.request.user.id]
+            if others:
+                Membership.objects.bulk_create(
+                    [
+                        Membership(chat=chat, user_id=uid, is_admin=False)
+                        for uid in others
+                    ],
+                    ignore_conflicts=True,
+                )
 
     def _check_membership(self, chat, user, require_admin=False):
         """Проверка участия и прав в чате"""
@@ -284,6 +306,13 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         membership.delete()
 
+        # Уведомляем WS-группу: consumer удалённого пользователя закроет его сокет (4003)
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"chat_{chat.id}",
+            {"type": "member.removed", "user_id": str(user_to_remove_id)},
+        )
+
         # Если в чате не осталось участников — удаляем сам чат
         if not Membership.objects.filter(chat=chat).exists():
             chat.delete()
@@ -318,15 +347,13 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         interlocutor_id = serializer.validated_data["interlocutor_id"]
 
-        # Ищем существующий личный чат между этими двумя пользователями
-        # Аннотируем чаты количеством участников и фильтруем PRIVATE
+        # Отдельные filter() по M2M = независимые JOIN'ы: фильтр по участникам
+        # в одном запросе с Count() обрезает JOIN и ломает подсчёт.
         existing_chat = (
-            Chat.objects.filter(
-                type=Chat.ChatType.PRIVATE,
-                members=request.user,
-            )
-            .annotate(member_count=Count("members"))
-            .filter(member_count=2, members__id=interlocutor_id)
+            Chat.objects.filter(type=Chat.ChatType.PRIVATE)
+            .filter(members=request.user)
+            .filter(members__id=interlocutor_id)
+            .order_by("created_at")
             .first()
         )
 
@@ -337,13 +364,14 @@ class ChatViewSet(viewsets.ModelViewSet):
             )
 
         # Создаём новый личный чат
-        chat = Chat.objects.create(type=Chat.ChatType.PRIVATE)
-        Membership.objects.bulk_create(
-            [
-                Membership(chat=chat, user=request.user, is_admin=False),
-                Membership(chat=chat, user_id=interlocutor_id, is_admin=False),
-            ]
-        )
+        with transaction.atomic():
+            chat = Chat.objects.create(type=Chat.ChatType.PRIVATE)
+            Membership.objects.bulk_create(
+                [
+                    Membership(chat=chat, user=request.user, is_admin=False),
+                    Membership(chat=chat, user_id=interlocutor_id, is_admin=False),
+                ]
+            )
 
         return Response(
             ChatDetailSerializer(chat, context={"request": request}).data,
@@ -426,6 +454,7 @@ class MeView(APIView):
     """
     GET /auth/me/ — профиль текущего аутентифицированного пользователя.
     """
+
     permission_classes = [IsAuthenticated]
 
     @extend_schema(

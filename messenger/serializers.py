@@ -1,9 +1,8 @@
+from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from django.contrib.auth import get_user_model
 # from django.contrib.auth.password_validation import validate_password
-
 from .models import Chat, Message
 
 User = get_user_model()
@@ -144,12 +143,79 @@ class ChatListSerializer(serializers.ModelSerializer):
         return None
 
 
+class ChatMemberSerializer(UserSerializer):
+    """Участник чата с флагом администратора (для Swagger-схемы)"""
+
+    is_admin = serializers.BooleanField()
+
+
 class ChatDetailSerializer(serializers.ModelSerializer):
-    members = UserSerializer(many=True, read_only=True)
+    members = serializers.SerializerMethodField()
+    my_is_admin = serializers.SerializerMethodField()
 
     class Meta:
         model = Chat
-        fields = ("id", "type", "name", "members", "created_at")
+        fields = ("id", "type", "name", "members", "my_is_admin", "created_at")
+
+    @extend_schema_field(ChatMemberSerializer(many=True))
+    def get_members(self, obj):
+        admin_flags = {m.user_id: m.is_admin for m in obj.membership_set.all()}
+        result = []
+        for member in obj.members.all():
+            data = UserSerializer(member).data
+            data["is_admin"] = admin_flags.get(member.id, False)
+            result.append(data)
+        return result
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_my_is_admin(self, obj):
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            membership = obj.membership_set.filter(user=request.user).first()
+            return bool(membership and membership.is_admin)
+        return False
+
+
+class ChatCreateSerializer(serializers.ModelSerializer):
+    """
+    Создание чата. Для GROUP можно сразу передать участников (member_ids) —
+    создатель автоматически становится админом.
+    """
+
+    member_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        write_only=True,
+        help_text="UUID пользователей, которых добавить в чат (для групповых чатов)",
+    )
+
+    class Meta:
+        model = Chat
+        fields = ("id", "type", "name", "member_ids")
+
+    def validate(self, attrs: dict) -> dict:
+        if attrs.get("type") == Chat.ChatType.GROUP:
+            if not attrs.get("name", "").strip():
+                raise serializers.ValidationError(
+                    {"name": "Групповой чат должен иметь название."}
+                )
+        elif attrs.get("member_ids"):
+            raise serializers.ValidationError(
+                {"member_ids": "Участников можно добавлять только в групповой чат."}
+            )
+        return attrs
+
+    def validate_member_ids(self, value):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        if value:
+            found = User.objects.filter(id__in=value).count()
+            if found != len(set(value)):
+                raise serializers.ValidationError(
+                    "Один или несколько пользователей не найдены."
+                )
+        return list(set(value))
 
 
 class MessageCreateSerializer(serializers.Serializer):

@@ -42,6 +42,14 @@ const displayName = computed(() => {
 //   }
 // })
 
+const wsStatusColor = computed(() => ({
+  connected: '#4caf50', connecting: '#ff9800', disconnected: '#e74c3c', error: '#e74c3c',
+}[chatStore.wsStatus]))
+
+const wsStatusLabel = computed(() => ({
+  connected: 'на связи', connecting: 'подключение...', disconnected: 'нет соединения', error: 'нет соединения',
+}[chatStore.wsStatus]))
+
 function handleLogout() {
   chatStore.resetMessages()
   auth.logout()
@@ -58,7 +66,17 @@ function getChatName(chat: any): string {
 <template>
   <div class="sidebar">
     <div class="sidebar-header">
-      <span>{{ displayName }}</span>
+      <div class="sidebar-user">
+        <span class="sidebar-user-name">Привет, {{ displayName }}</span>
+        <span
+          v-if="chatStore.selectedChatId"
+          class="ws-indicator"
+          title="Статус WebSocket-соединения"
+        >
+          <span class="ws-dot" :style="{ background: wsStatusColor }" />
+          {{ wsStatusLabel }}
+        </span>
+      </div>
       <button class="logout-btn" @click="handleLogout">Выйти</button>
     </div>
     <div class="chat-list">

@@ -1,13 +1,13 @@
 // src/composables/useChatSocket.ts
 import { ref, watch, onUnmounted } from 'vue'
-import type { Message } from '../stores/chat'
-
-type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+import type { Message, WsStatus } from '../stores/chat'
 
 interface WsCallbacks {
   onMessage: (msg: Message) => void
   onUserStatus: (userId: string, status: string) => void
   onMessagesRead: (readerId: string) => void
+  onInitialPresence: (userIds: string[]) => void
+  onClose?: (code: number) => void
 }
 
 /**
@@ -45,6 +45,8 @@ export function useChatSocket(
           callbacks.onUserStatus(data.user_id, data.status)
         } else if (data.type === 'messages_read') {
           callbacks.onMessagesRead(data.reader_id)
+        } else if (data.type === 'initial_presence') {
+          callbacks.onInitialPresence(data.user_ids ?? [])
         } else if (data.id) {
           callbacks.onMessage(data as Message)
         }
@@ -55,6 +57,7 @@ export function useChatSocket(
 
     ws.onclose = (event) => {
       status.value = 'disconnected'
+      callbacks.onClose?.(event.code)
       // Авто-reconnect кроме случаев отказа в авторизации/доступе
       if (![4001, 4003].includes(event.code)) {
         setTimeout(() => {

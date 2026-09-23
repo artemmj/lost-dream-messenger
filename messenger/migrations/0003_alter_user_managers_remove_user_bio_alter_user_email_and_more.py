@@ -4,44 +4,50 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('messenger', '0002_user_last_seen'),
+        ("messenger", "0002_user_last_seen"),
     ]
 
     operations = [
         migrations.AlterModelManagers(
-            name='user',
-            managers=[
-            ],
+            name="user",
+            managers=[],
         ),
         migrations.RemoveField(
-            model_name='user',
-            name='bio',
+            model_name="user",
+            name="bio",
         ),
         migrations.AlterField(
-            model_name='user',
-            name='email',
-            field=models.EmailField(blank=True, default='', max_length=254, verbose_name='Email'),
+            model_name="user",
+            name="email",
+            field=models.EmailField(
+                blank=True, default="", max_length=254, verbose_name="Email"
+            ),
         ),
         migrations.AlterField(
-            model_name='user',
-            name='first_name',
-            field=models.CharField(blank=True, default='', max_length=150, verbose_name='Имя'),
+            model_name="user",
+            name="first_name",
+            field=models.CharField(
+                blank=True, default="", max_length=150, verbose_name="Имя"
+            ),
         ),
         migrations.AlterField(
-            model_name='user',
-            name='last_name',
-            field=models.CharField(blank=True, default='', max_length=150, verbose_name='Фамилия'),
+            model_name="user",
+            name="last_name",
+            field=models.CharField(
+                blank=True, default="", max_length=150, verbose_name="Фамилия"
+            ),
         ),
         migrations.AlterField(
-            model_name='user',
-            name='last_seen',
-            field=models.DateTimeField(blank=True, null=True, verbose_name='Последний визит'),
+            model_name="user",
+            name="last_seen",
+            field=models.DateTimeField(
+                blank=True, null=True, verbose_name="Последний визит"
+            ),
         ),
         migrations.AlterField(
-            model_name='user',
-            name='phone',
-            field=models.CharField(max_length=20, unique=True, verbose_name='Телефон'),
+            model_name="user",
+            name="phone",
+            field=models.CharField(max_length=20, unique=True, verbose_name="Телефон"),
         ),
     ]

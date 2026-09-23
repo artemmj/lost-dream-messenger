@@ -29,10 +29,9 @@ class RecentMessagesInline(admin.TabularInline):
         formset = super().get_formset(request, obj, **kwargs)
         if obj:
             # obj — это Chat instance, к которому привязан inline
-            formset.queryset = (
-                Message.objects.filter(chat=obj)
-                .order_by("-created_at")[:7]
-            )
+            formset.queryset = Message.objects.filter(chat=obj).order_by("-created_at")[
+                :7
+            ]
         return formset
 
     @admin.display(description="Текст")

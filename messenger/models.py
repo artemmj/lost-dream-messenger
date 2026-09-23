@@ -19,19 +19,19 @@ class UserManager(BaseUserManager):
         Все остальные поля (email, first_name, last_name) — опциональны.
         """
         if not phone:
-            raise ValueError('Телефон обязателен')
+            raise ValueError("Телефон обязателен")
 
         # Нормализация телефона: убираем пробелы, скобки, дефисы
-        phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+        phone = "".join(c for c in phone if c.isdigit() or c == "+")
 
         # email может быть None или пустой строкой — нормализуем
-        email = extra_fields.pop('email', None)
+        email = extra_fields.pop("email", None)
         if email:
             email = self.normalize_email(email)
 
         user = self.model(
             phone=phone,
-            email=email or '',
+            email=email or "",
             **extra_fields,
         )
         user.set_password(password)
@@ -44,41 +44,47 @@ class UserManager(BaseUserManager):
         Требует ТОЛЬКО телефон и пароль.
         Автоматически ставит is_staff=True, is_superuser=True.
         """
-        extra_fields.setdefault('is_staff', True)
-        extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
 
-        if extra_fields.get('is_staff') is not True:
-            raise ValueError('Суперпользователь должен иметь is_staff=True')
-        if extra_fields.get('is_superuser') is not True:
-            raise ValueError('Суперпользователь должен иметь is_superuser=True')
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Суперпользователь должен иметь is_staff=True")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Суперпользователь должен иметь is_superuser=True")
 
         return self.create_user(phone, password, **extra_fields)
 
 
 class User(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    phone = models.CharField(max_length=20, unique=True, verbose_name='Телефон')
-    email = models.EmailField(blank=True, default='', verbose_name='Email')
-    first_name = models.CharField(max_length=150, blank=True, default='', verbose_name='Имя')
-    last_name = models.CharField(max_length=150, blank=True, default='', verbose_name='Фамилия')
-    last_seen = models.DateTimeField(null=True, blank=True, verbose_name='Последний визит')
+    phone = models.CharField(max_length=20, unique=True, verbose_name="Телефон")
+    email = models.EmailField(blank=True, default="", verbose_name="Email")
+    first_name = models.CharField(
+        max_length=150, blank=True, default="", verbose_name="Имя"
+    )
+    last_name = models.CharField(
+        max_length=150, blank=True, default="", verbose_name="Фамилия"
+    )
+    last_seen = models.DateTimeField(
+        null=True, blank=True, verbose_name="Последний визит"
+    )
 
     # Переопределяем username_field и manager
-    USERNAME_FIELD = 'phone'
+    USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = []  # ← Пустой! createsuperuser спросит ТОЛЬКО phone + password
 
     objects = UserManager()
 
     class Meta:
-        verbose_name = 'Пользователь'
-        verbose_name_plural = 'Пользователи'
+        verbose_name = "Пользователь"
+        verbose_name_plural = "Пользователи"
 
     def __str__(self):
         return self.first_name or self.phone
 
     @property
     def full_name(self):
-        name = f'{self.first_name} {self.last_name}'.strip()
+        name = f"{self.first_name} {self.last_name}".strip()
         return name or self.phone
 
 

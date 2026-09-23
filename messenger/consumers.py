@@ -1,10 +1,28 @@
-from channels.generic.websocket import AsyncJsonWebsocketConsumer
+import os
+
+import redis.asyncio as aioredis
 from channels.db import database_sync_to_async
+from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 
+from .models import Membership, Message
 from .ws_auth import get_user_from_scope
-from .models import Message, Membership
+
+PRESENCE_KEY = "messenger:presence"
+
+_redis_client = None
+
+
+def get_redis() -> aioredis.Redis:
+    """Ленивый singleton Redis-клиента для presence-реестра."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = aioredis.from_url(
+            f"redis://{os.environ.get('REDIS_HOST', 'redis')}:6379/0",
+            decode_responses=True,
+        )
+    return _redis_client
 
 
 def message_payload(msg: Message) -> dict:
@@ -64,31 +82,46 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # Обновляем last_seen
         await self._update_last_seen()
 
-        # Уведомляем остальных об онлайн-статусе
-        await self.channel_layer.group_send(
-            self.group_name,
+        # Presence: инкрементируем счётчик соединений пользователя.
+        # Online анонсируется только при первом соединении (учитываются
+        # несколько вкладок/устройств одного пользователя).
+        count = await self._presence_enter()
+        if count == 1:
+            await self.channel_layer.group_send(
+                self.group_name,
+                {
+                    "type": "user.status",
+                    "user_id": str(self.user.id),
+                    "status": "online",
+                },
+            )
+
+        # Подключившемуся клиенту — снимок: кто из участников чата уже онлайн
+        await self.send_json(
             {
-                "type": "user.status",
-                "user_id": str(self.user.id),
-                "status": "online",
-            },
+                "type": "initial_presence",
+                "user_ids": await self._online_member_ids(),
+            }
         )
 
     async def disconnect(self, close_code):
         # Обновляем last_seen при отключении
         if not isinstance(self.user, AnonymousUser):
-            await self._update_last_seen()
+            # Offline анонсируется только когда закрылось последнее соединение
+            count = await self._presence_leave()
+            if count == 0:
+                await self._update_last_seen()
 
-            # Уведомляем об оффлайне
-            if hasattr(self, "group_name"):
-                await self.channel_layer.group_send(
-                    self.group_name,
-                    {
-                        "type": "user.status",
-                        "user_id": str(self.user.id),
-                        "status": "offline",
-                    },
-                )
+                # Уведомляем об оффлайне
+                if hasattr(self, "group_name"):
+                    await self.channel_layer.group_send(
+                        self.group_name,
+                        {
+                            "type": "user.status",
+                            "user_id": str(self.user.id),
+                            "status": "offline",
+                        },
+                    )
 
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(self.group_name, self.channel_name)
@@ -146,6 +179,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             }
         )
 
+    async def member_removed(self, event):
+        """Участник удалён из чата: закрываем сокет удалённого пользователя."""
+        if event.get("user_id") == str(self.user.id):
+            await self.close(code=4003)
+
     # --- DB operations (sync → async safe) ---
 
     @database_sync_to_async
@@ -175,3 +213,36 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
         User = get_user_model()
         User.objects.filter(id=self.user.id).update(last_seen=timezone.now())
+
+    # --- Presence (Redis: hash user_id → счётчик активных соединений) ---
+
+    async def _presence_enter(self) -> int:
+        self._presence_entered = True
+        count = await get_redis().hincrby(PRESENCE_KEY, str(self.user.id), 1)
+        return int(count)
+
+    async def _presence_leave(self) -> int:
+        # Если соединение закрылось до accept (4001/4003), счётчик не трогали
+        if not getattr(self, "_presence_entered", False):
+            return 1
+        uid = str(self.user.id)
+        r = get_redis()
+        count = int(await r.hincrby(PRESENCE_KEY, uid, -1))
+        if count <= 0:
+            await r.hdel(PRESENCE_KEY, uid)
+            return 0
+        return count
+
+    @database_sync_to_async
+    def _member_ids(self) -> list:
+        return [
+            str(uid)
+            for uid in Membership.objects.filter(chat_id=self.chat_id).values_list(
+                "user_id", flat=True
+            )
+        ]
+
+    async def _online_member_ids(self) -> list:
+        presence = await get_redis().hgetall(PRESENCE_KEY)
+        members = await self._member_ids()
+        return [uid for uid in members if int(presence.get(uid, 0)) > 0]

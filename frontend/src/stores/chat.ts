@@ -10,6 +10,10 @@ export interface User {
   last_name?: string
 }
 
+export interface ChatMember extends User {
+  is_admin: boolean
+}
+
 export interface Message {
   id: string
   chat: string
@@ -28,10 +32,33 @@ export interface ChatListItem {
   interlocutor: User | null
 }
 
+export interface ChatDetails {
+  id: string
+  type: 'PRIVATE' | 'GROUP'
+  name: string
+  members: ChatMember[]
+  my_is_admin: boolean
+  created_at: string
+}
+
+export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+
 export const useChatStore = defineStore('chat', () => {
   const chats = ref<ChatListItem[]>([])
   const selectedChatId = ref<string | null>(null)
   const messages = ref<Message[]>([])
+  const currentChatDetails = ref<ChatDetails | null>(null)
+
+  // Состояние WS-соединения текущего чата: пишет ChatWindow, читает ChatSidebar
+  const wsStatus = ref<WsStatus>('disconnected')
+
+  // Пагинация истории: страница 1 = последние сообщения, страница N = более старые
+  const messagesPage = ref(1)
+  const hasMoreMessages = ref(false)
+  const isLoadingHistory = ref(false)
+
+  // Присутствие: id пользователей, которые сейчас онлайн
+  const onlineUsers = ref<Set<string>>(new Set())
 
   async function loadChats() {
     try {
@@ -45,11 +72,49 @@ export const useChatStore = defineStore('chat', () => {
   async function selectChat(chatId: string) {
     selectedChatId.value = chatId
     messages.value = []
+    messagesPage.value = 1
+    hasMoreMessages.value = false
+    currentChatDetails.value = null
     try {
       const { data } = await api.get(`/chats/${chatId}/messages/`)
+      if (selectedChatId.value !== chatId) return
       messages.value = Array.isArray(data) ? data : data.results
+      hasMoreMessages.value = Array.isArray(data) ? false : !!data.next
     } catch (e) {
       console.error('loadMessages:', e)
+    }
+    loadChatDetails(chatId)
+  }
+
+  async function loadChatDetails(chatId: string) {
+    try {
+      const { data } = await api.get(`/chats/${chatId}/`)
+      if (selectedChatId.value === chatId) currentChatDetails.value = data
+    } catch (e) {
+      console.error('loadChatDetails:', e)
+    }
+  }
+
+  /** Догрузка более старых сообщений (prepend с сохранением порядка) */
+  async function loadOlderMessages() {
+    const chatId = selectedChatId.value
+    if (!chatId || isLoadingHistory.value || !hasMoreMessages.value) return
+    isLoadingHistory.value = true
+    try {
+      const nextPage = messagesPage.value + 1
+      const { data } = await api.get(`/chats/${chatId}/messages/`, {
+        params: { page: nextPage },
+      })
+      if (selectedChatId.value !== chatId) return
+      const older: Message[] = data.results ?? []
+      const existing = new Set(messages.value.map((m) => m.id))
+      messages.value = [...older.filter((m) => !existing.has(m.id)), ...messages.value]
+      messagesPage.value = nextPage
+      hasMoreMessages.value = !!data.next
+    } catch (e) {
+      console.error('loadOlderMessages:', e)
+    } finally {
+      isLoadingHistory.value = false
     }
   }
 
@@ -70,10 +135,55 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  function removeChat(chatId: string) {
+    chats.value = chats.value.filter((c) => c.id !== chatId)
+    if (selectedChatId.value === chatId) {
+      selectedChatId.value = null
+      messages.value = []
+      currentChatDetails.value = null
+    }
+  }
+
+  function setUserStatus(userId: string, status: string) {
+    if (status === 'online') onlineUsers.value.add(userId)
+    else onlineUsers.value.delete(userId)
+  }
+
+  function setInitialPresence(userIds: string[]) {
+    onlineUsers.value = new Set(userIds)
+  }
+
+  function setWsStatus(status: WsStatus) {
+    wsStatus.value = status
+  }
+
   function resetMessages() {
     messages.value = []
     selectedChatId.value = null
+    currentChatDetails.value = null
+    wsStatus.value = 'disconnected'
   }
 
-  return { chats, selectedChatId, messages, loadChats, selectChat, addMessage, markAllRead, resetMessages }
+  return {
+    chats,
+    selectedChatId,
+    messages,
+    currentChatDetails,
+    messagesPage,
+    hasMoreMessages,
+    isLoadingHistory,
+    onlineUsers,
+    wsStatus,
+    loadChats,
+    selectChat,
+    loadChatDetails,
+    loadOlderMessages,
+    addMessage,
+    markAllRead,
+    removeChat,
+    setUserStatus,
+    setInitialPresence,
+    setWsStatus,
+    resetMessages,
+  }
 })

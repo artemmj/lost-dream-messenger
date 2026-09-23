@@ -33,7 +33,7 @@ lost-dream-messenger/
 └── frontend/                      # Vue 3 SPA
     ├── src/
     │   ├── assets/styles.css      # Глобальные стили (CSS variables)
-    │   ├── components/            # ChatSidebar, ChatWindow, MessageBubble, NewChatModal
+    │   ├── components/            # ChatSidebar, ChatWindow, MessageBubble, NewChatModal, GroupMembersModal
     │   │   └── (TheWelcome, WelcomeItem, icons/ — мёртвый код шаблона create-vue)
     │   ├── composables/           # useChatSocket — WS-подключение, reconnect, отправка
     │   ├── stores/                # Pinia: auth.ts (JWT, профиль), chat.ts (чаты, сообщения)
@@ -64,6 +64,7 @@ lost-dream-messenger/
 | @vueuse/core | Готовые composables (useDebounceFn) вместо самописных |
 | Multi-stage Dockerfile frontend | Dev (Vite HMR) и prod (nginx) из одного Dockerfile; в compose пока используется только dev |
 | `message_payload()` в consumers.py | Единый формат WS-сообщения для consumer'а и REST-broadcast — клиенты не различают источник |
+| Presence через Redis-hash `messenger:presence` | Счётчик соединений на пользователя (несколько вкладок/устройств): `online` — при 0→1, `offline` — при 1→0; отдельный клиент от channel layer, ключ общий |
 
 ## 📦 Модели данных
 
@@ -81,10 +82,10 @@ lost-dream-messenger/
 | POST | `/auth/refresh/` | Refresh access token |
 | GET | `/auth/me/` | Профиль текущего пользователя (по JWT) |
 | GET | `/chats/` | Мои чаты с `last_message` и `interlocutor` (для PRIVATE), пагинация (50) |
-| POST | `/chats/` | Создать чат (создатель автоматически становится админом через Membership) |
-| GET | `/chats/{id}/` | Детали чата с участниками |
+| POST | `/chats/` | Создать чат (создатель — админ; для GROUP обязателен `name`, можно передать `member_ids` — участники добавляются атомарно в транзакции; ответ — формат ChatDetail) |
+| GET | `/chats/{id}/` | Детали чата: `members` с флагом `is_admin` у каждого + `my_is_admin` текущего пользователя |
 | DELETE | `/chats/{id}/` | Удалить чат (⚠️ доступен любому участнику — см. Tech Debt) |
-| POST | `/chats/private/` | Создать/найти личный чат (идемпотентно: ищет PRIVATE-чат с ровно 2 участниками) |
+| POST | `/chats/private/` | Создать/найти личный чат (идемпотентно: если PRIVATE-чат, где состоят оба пользователя, уже есть — вернёт его с 200, иначе создаст с 201) |
 | GET | `/chats/{id}/messages/` | История: страница 1 = **последние** 50 сообщений (сортировка `-created_at`), внутри страницы — по возрастанию времени |
 | POST | `/chats/{id}/send/` | Отправить сообщение (REST fallback) + broadcast в WS-группу `chat_{id}` |
 | POST | `/chats/{id}/add-member/` | Добавить участника (только админ, **только GROUP-чаты**) |
@@ -106,8 +107,9 @@ lost-dream-messenger/
 | type | Payload | Описание |
 |------|---------|----------|
 | *(нет поля type)* | `{id, chat, sender: {id, phone, first_name, last_name}, text, created_at, is_read}` | Новое сообщение (идентичный формат из WS-отправки и REST-broadcast) |
-| `user_status` | `{user_id, status: "online"\|"offline"}` | Статус пользователя (фронт пока только логирует) |
+| `user_status` | `{user_id, status: "online"\|"offline"}` | Статус пользователя (фронт хранит в `onlineUsers` и показывает точку в шапке личного чата) |
 | `messages_read` | `{reader_id}` | Кто-то прочитал сообщения (приходит и самому читателю — клиент обязан фильтровать по `reader_id != my_id`) |
+| `initial_presence` | `{user_ids: [...]}` | При подключении: id участников чата, которые сейчас онлайн (отправляется только подключившемуся клиенту) |
 | `{error: "..."}` | — | Пустое/слишком длинное сообщение |
 
 **События клиент → сервер:**
@@ -116,7 +118,11 @@ lost-dream-messenger/
 |------|---------|----------|
 | *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке |
 
-**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → broadcast `user_status: online`.
+**Поведение при подключении:** проверка JWT → отказ анонимам (4001) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → presence: `HINCRBY messenger:presence {user_id} 1`, broadcast `user_status: online` **только при счётчике 1** → отправка `initial_presence` подключившемуся клиенту.
+
+**Поведение при отключении:** `HINCRBY -1`; broadcast `user_status: offline` и обновление `last_seen` — **только при счётчике 0** (учитывается несколько вкладок/устройств). Если соединение закрыто до accept (4001/4003), счётчик не трогается.
+
+**Удаление участника:** REST `remove-member` шлёт в группу событие `member.removed` — consumer удалённого пользователя закрывает его сокет с кодом 4003 (фронт по этому коду убирает чат из списка).
 
 **Коды закрытия:**
 
@@ -128,11 +134,13 @@ lost-dream-messenger/
 ## 🖥 Frontend (Vue 3 SPA)
 
 - **auth.ts (Pinia)**: login/register сохраняют токены в localStorage и грузят профиль через `/auth/me/`; `getUserFromToken()` при перезагрузке восстанавливает из JWT только `id` (payload не содержит имени/телефона), полный профиль догружает `App.vue` в `onMounted`. Logout — только очистка localStorage.
-- **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (загружает первую страницу сообщений), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`.
+- **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (первая страница сообщений + `loadChatDetails()`), `loadOlderMessages()` (prepend следующей страницы; состояние `messagesPage`/`hasMoreMessages`/`isLoadingHistory`; guard от смены чата во время запроса), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`, `removeChat()`. Presence: `onlineUsers` (Set id) + `setUserStatus()`/`setInitialPresence()`. Состояние WS: `wsStatus` (`WsStatus`, тип экспортируется и используется в useChatSocket) + `setWsStatus()` — пишет ChatWindow, отображает ChatSidebar; сбрасывается в `disconnected` в `resetMessages()`.
 - **api.ts**: axios с Bearer-interceptor; при 401 — один retry через `/auth/refresh/`, при неудаче — очистка токенов и редирект на `/login`.
-- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c (кроме кодов 4001/4003), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. После reconnect история НЕ перечитывается.
-- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`), автоскролл, индикатор состояния **WS-соединения** (не присутствия собеседника!), обработка `messages_read` с фильтром по `readerId`.
-- **NewChatModal.vue**: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка чатов (созданный чат не выбирается автоматически).
+- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c (кроме кодов 4001/4003), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onClose(code)`. После reconnect история НЕ перечитывается.
+- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; при close-коде 4003 — `removeChat()` + плашка «Вы удалены из этого чата».
+- **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
+- **GroupMembersModal.vue**: список участников (бейджи «админ»/«вы»); админ — debounced-поиск и добавление (`POST add-member/`), удаление любого (`POST remove-member/`); любой участник — «Выйти» (выход из чата, при опустевшем чате сервер его удаляет).
+- **NewChatModal.vue**: режимы «Личный / Групповой». Личный: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка + **автовыбор** чата. Групповой: название + мультивыбор пользователей из поиска (chips) → `POST /chats/ {type, name, member_ids}` → автовыбор.
 - Роуты: `/login`, `/` (requiresAuth), catch-all → `/login`.
 
 ## 🐳 Инфраструктура
@@ -172,15 +180,16 @@ docker compose down -v && docker compose up --build -d
 ## 🚧 В планах (приоритет по убыванию)
 
 ### Phase 2: Features
-- [ ] Визуальный онлайн-статус собеседника (события `user_status` с сервера уже есть, нужен UI + состояние в store)
-- [ ] Создание групповых чатов из UI
-- [ ] Добавление/удаление участников группового чата из UI
-- [ ] Пагинация сообщений в UI (scroll up → загрузить ещё; API уже отдаёт страницы от новых к старым)
+- [x] Визуальный онлайн-статус собеседника (presence в Redis + `initial_presence` + точка в шапке PRIVATE-чата)
+- [x] Создание групповых чатов из UI (режим «Групповой» в NewChatModal, `member_ids` в `POST /chats/`)
+- [x] Добавление/удаление участников группового чата из UI (GroupMembersModal, выход из чата, live-закрытие сокета удалённого участника)
+- [x] Пагинация сообщений в UI (infinite scroll вверх с якорем позиции)
 - [ ] Перечитывание истории после WS-reconnect
 - [ ] Typing indicators («печатает...»)
 - [ ] Загрузка файлов и изображений (MEDIA_* в settings заданы, но media не раздаётся)
 - [ ] Message editing / deletion
 - [ ] Push notifications
+- [ ] Онлайн-статус участников в групповых чатах (сейчас presence показывается только в PRIVATE)
 
 ### Phase 3: Quality & Ops
 - [ ] pytest + factory_boy + coverage > 80% (tests.py сейчас пустой)
@@ -198,7 +207,7 @@ docker compose down -v && docker compose up --build -d
 3. **Нет тестов** — покрытие 0% (backend + frontend).
 4. **`DELETE /chats/{id}/` не переопределён** — любой участник (не только админ) может удалить чат; эндпоинт не задокументирован в Swagger-описаниях.
 5. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
-6. **`create_private` не атомарен** — без транзакции/unique-ограничения параллельные запросы теоретически могут создать дубликаты личных чатов.
+6. **`create_private` без unique-ограничения** — создание обёрнуто в `transaction.atomic()`, но при параллельных запросах дубликаты личных чатов теоретически возможны.
 7. **`last_seen` обновляется только при WS connect/disconnect** — не отражает реальную активность.
 8. **Нет soft-delete** — удаление чата/сообщения физическое.
 9. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.

@@ -6,11 +6,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = "django-insecure-b-lzir18=x4tvtyg())e*dd02@q=05_9!(coe4q*#+v97%_7jd"
 DEBUG = True
 ALLOWED_HOSTS = [
-    'localhost',
-    '127.0.0.1',
-    '0.0.0.0',
-    'backend',           # Docker internal DNS
-    'localhost:5173',    # ← Vite dev server origin
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "backend",  # Docker internal DNS
+    "localhost:5173",  # ← Vite dev server origin
 ]
 
 INSTALLED_APPS = [
@@ -20,7 +20,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    'corsheaders',
+    "corsheaders",
     "rest_framework",
     "django_filters",
     "drf_spectacular",
@@ -33,7 +33,7 @@ ASGI_APPLICATION = "config.asgi.application"
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    'corsheaders.middleware.CorsMiddleware',
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -174,8 +174,8 @@ CHANNEL_LAYERS = {
 }
 
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:5173',  # Vite dev server
-    'http://127.0.0.1:5173',
+    "http://localhost:5173",  # Vite dev server
+    "http://127.0.0.1:5173",
 ]
 # Для WebSocket тоже нужно разрешить
 CORS_ALLOW_CREDENTIALS = True
