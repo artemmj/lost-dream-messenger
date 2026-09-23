@@ -42,7 +42,7 @@ class RecentMessagesInline(admin.TabularInline):
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    pass
+    list_display = ("id", "username", "email", "phone")
 
 
 @admin.register(Chat)
