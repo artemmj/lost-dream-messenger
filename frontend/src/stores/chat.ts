@@ -43,6 +43,9 @@ export interface ChatDetails {
 
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
+// PAGE_SIZE бэкенда: полная страница означает, что пропущенных сообщений может быть больше
+const MESSAGES_PAGE_SIZE = 50
+
 export const useChatStore = defineStore('chat', () => {
   const chats = ref<ChatListItem[]>([])
   const selectedChatId = ref<string | null>(null)
@@ -118,6 +121,39 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * Перечитывание истории после WS-reconnect: добираем сообщения, пришедшие,
+   * пока соединение было разорвано.
+   */
+  async function reloadMessages() {
+    const chatId = selectedChatId.value
+    if (!chatId) return
+    try {
+      const { data } = await api.get(`/chats/${chatId}/messages/`)
+      if (selectedChatId.value !== chatId) return
+      const latest: Message[] = Array.isArray(data) ? data : data.results ?? []
+      if (latest.length >= MESSAGES_PAGE_SIZE) {
+        // Пока нас не было, пришло не меньше целой страницы — в истории могла
+        // появиться «дыра», поэтому перезагружаем её с конца.
+        messages.value = latest
+        messagesPage.value = 1
+        hasMoreMessages.value = Array.isArray(data) ? false : !!data.next
+        return
+      }
+      const known = new Map(messages.value.map((m) => [m.id, m]))
+      const fresh: Message[] = []
+      for (const msg of latest) {
+        const prev = known.get(msg.id)
+        // Статус прочтения мог измениться, пока сокет был закрыт
+        if (prev) prev.is_read = msg.is_read
+        else fresh.push(msg)
+      }
+      if (fresh.length) messages.value = [...messages.value, ...fresh]
+    } catch (e) {
+      console.error('reloadMessages:', e)
+    }
+  }
+
   /** Добавляем сообщение от WS или REST (с дедупликацией) */
   function addMessage(msg: Message) {
     if (!messages.value.some((m) => m.id === msg.id)) {
@@ -178,6 +214,7 @@ export const useChatStore = defineStore('chat', () => {
     selectChat,
     loadChatDetails,
     loadOlderMessages,
+    reloadMessages,
     addMessage,
     markAllRead,
     removeChat,

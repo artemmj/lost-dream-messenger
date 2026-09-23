@@ -33,6 +33,12 @@ const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
       if (readerId !== auth.user?.id) chatStore.markAllRead(auth.user?.id || '')
     },
     onInitialPresence: (userIds) => chatStore.setInitialPresence(userIds),
+    // Пока сокет был разорван, сообщения приходили мимо нас — добираем их через REST.
+    // Прокрутку вниз возьмёт на себя watcher по lastMessageId.
+    onReconnect: () => {
+      chatStore.reloadMessages()
+      chatStore.loadChats()
+    },
     // 4003 — не участник чата (удалён во время сессии), 4004 — чат удалён
     onClose: (code) => {
       const notice = CLOSE_NOTICES[code]

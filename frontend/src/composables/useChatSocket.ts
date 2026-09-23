@@ -8,6 +8,8 @@ interface WsCallbacks {
   onMessagesRead: (readerId: string) => void
   onInitialPresence: (userIds: string[]) => void
   onClose?: (code: number) => void
+  /** Соединение восстановлено после обрыва — пора перечитать историю */
+  onReconnect?: () => void
 }
 
 /**
@@ -26,6 +28,9 @@ export function useChatSocket(
 ) {
   const status = ref<WsStatus>('disconnected')
   let ws: WebSocket | null = null
+  // Для текущего чата уже была попытка соединения (успешная или нет):
+  // следующее успешное открытие — это reconnect, история могла устареть.
+  let hadConnection = false
 
   function connect(id: string) {
     if (ws) ws.close()
@@ -34,11 +39,18 @@ export function useChatSocket(
 
     status.value = 'connecting'
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws = new WebSocket(`${protocol}//${location.host}/ws/chat/${id}/?token=${t}`)
+    const socket = new WebSocket(`${protocol}//${location.host}/ws/chat/${id}/?token=${t}`)
+    ws = socket
 
-    ws.onopen = () => { status.value = 'connected' }
+    socket.onopen = () => {
+      if (ws !== socket) return
+      status.value = 'connected'
+      if (hadConnection) callbacks.onReconnect?.()
+      hadConnection = true
+    }
 
-    ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (ws !== socket) return
       try {
         const data = JSON.parse(event.data)
         if (data.type === 'user_status') {
@@ -55,8 +67,13 @@ export function useChatSocket(
       }
     }
 
-    ws.onclose = (event) => {
+    socket.onclose = (event) => {
+      // События закрытого при смене чата сокета приходят асинхронно и не должны
+      // влиять на состояние нового соединения
+      if (ws !== socket) return
       status.value = 'disconnected'
+      // Даже неудачное соединение считается: следующее открытие — reconnect
+      hadConnection = true
       callbacks.onClose?.(event.code)
       // Авто-reconnect кроме случаев отказа в авторизации/доступе/удаления чата
       if (![4001, 4003, 4004].includes(event.code)) {
@@ -66,7 +83,9 @@ export function useChatSocket(
       }
     }
 
-    ws.onerror = () => { status.value = 'error' }
+    socket.onerror = () => {
+      if (ws === socket) status.value = 'error'
+    }
   }
 
   function disconnect() {
@@ -84,6 +103,8 @@ export function useChatSocket(
 
   // Следим за изменением chatId — переподключаемся
   watch(chatId, (newId) => {
+    // Смена чата — не reconnect: история только что загружена через REST
+    hadConnection = false
     if (newId) connect(newId)
     else disconnect()
   }, { immediate: true })
