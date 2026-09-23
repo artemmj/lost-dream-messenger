@@ -39,6 +39,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # После AuthenticationMiddleware: читает request.user уже после отработки view
+    "messenger.middleware.LastSeenMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

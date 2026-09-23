@@ -10,7 +10,7 @@
 ```
 lost-dream-messenger/
 ├── config/                        # Django project
-│   ├── settings.py                # DB, REST_FRAMEWORK, SIMPLE_JWT, SPECTACULAR, CHANNEL_LAYERS, CORS
+│   ├── settings.py                # DB, MIDDLEWARE (+ LastSeenMiddleware), REST_FRAMEWORK, SIMPLE_JWT, SPECTACULAR, CHANNEL_LAYERS, CORS
 │   ├── asgi.py                    # ASGI app: ProtocolTypeRouter (HTTP + WebSocket, AllowedHostsOriginValidator)
 │   ├── urls.py                    # admin/ + api/v1/ → messenger.urls
 │   └── wsgi.py                    # Fallback (в prod не используется, сервер — Daphne)
@@ -19,6 +19,8 @@ lost-dream-messenger/
 │   ├── serializers.py             # DRF-сериалайзеры + Swagger-аннотации
 │   ├── views.py                   # ChatViewSet, RegisterView, UserSearchView, MeView
 │   ├── consumers.py               # ChatConsumer (AsyncJsonWebsocketConsumer) + message_payload()
+│   ├── activity.py                # touch_last_seen() — обновление last_seen с троттлингом 60 с
+│   ├── middleware.py              # LastSeenMiddleware — активность на авторизованных REST-запросах
 │   ├── ws_auth.py                 # JWT-аутентификация для WebSocket (token из query string)
 │   ├── routing.py                 # WebSocket URL patterns
 │   ├── admin.py                   # Django Admin с inlines (Membership, последние сообщения)
@@ -64,10 +66,13 @@ lost-dream-messenger/
 | Multi-stage Dockerfile frontend | Dev (Vite HMR) и prod (nginx) из одного Dockerfile; в compose пока используется только dev |
 | `message_payload()` в consumers.py | Единый формат WS-сообщения для consumer'а и REST-broadcast — клиенты не различают источник |
 | Presence через Redis-hash `messenger:presence` | Счётчик соединений на пользователя (несколько вкладок/устройств): `online` — при 0→1, `offline` — при 1→0; отдельный клиент от channel layer, ключ общий |
+| `select_for_update` в `create_private` | Идемпотентность пары пользователей без unique-индекса (на M2M его не выразить); блокировка строк в порядке `id` исключает deadlock |
+| `LastSeenMiddleware` читает `request.user` в response-фазе | DRF аутентифицирует запрос внутри view и сам пробрасывает пользователя в Django HttpRequest — до view там всегда аноним |
+| `touch_last_seen()` с троттлингом 60 с | Активность пишется в БД не чаще раза в минуту; условие троттлинга продублировано в `UPDATE` на случай протухшего объекта в памяти |
 
 ## 📦 Модели данных
 
-- **User** (`AbstractUser` + UUID PK): `phone` (unique, USERNAME_FIELD), `email`/`first_name`/`last_name` (опциональные), `last_seen` (обновляется при WS connect/disconnect). Кастомный `UserManager` нормализует телефон (оставляет цифры и `+`).
+- **User** (`AbstractUser` + UUID PK): `phone` (unique, USERNAME_FIELD), `email`/`first_name`/`last_name` (опциональные), `last_seen` (обновляется при WS connect/disconnect, при отправке сообщения в WS и на любом авторизованном REST-запросе — с троттлингом 60 с). Кастомный `UserManager` нормализует телефон (оставляет цифры и `+`).
 - **Chat**: `type` (PRIVATE/GROUP), `name` (для групп), `members` M2M через Membership, ordering `-created_at`.
 - **Membership**: user ↔ chat, `is_admin`, unique constraint `unique_user_chat` (продублирован legacy `unique_together`).
 - **Message**: `chat` FK, `sender` FK, `text` (≤5000), `created_at`, `is_read` (глобальный флаг на сообщение, не per-user), index `(chat, created_at)`, ordering `created_at`.
@@ -83,8 +88,8 @@ lost-dream-messenger/
 | GET | `/chats/` | Мои чаты с `last_message` и `interlocutor` (для PRIVATE), пагинация (50) |
 | POST | `/chats/` | Создать чат (создатель — админ; для GROUP обязателен `name`, можно передать `member_ids` — участники добавляются атомарно в транзакции; ответ — формат ChatDetail) |
 | GET | `/chats/{id}/` | Детали чата: `members` с флагом `is_admin` у каждого + `my_is_admin` текущего пользователя |
-| DELETE | `/chats/{id}/` | Удалить чат (⚠️ доступен любому участнику — см. Tech Debt) |
-| POST | `/chats/private/` | Создать/найти личный чат (идемпотентно: если PRIVATE-чат, где состоят оба пользователя, уже есть — вернёт его с 200, иначе создаст с 201) |
+| DELETE | `/chats/{id}/` | Удалить чат вместе с сообщениями: GROUP — только админ чата, PRIVATE — любой участник; остальным участникам приходит WS-закрытие 4004 |
+| POST | `/chats/private/` | Создать/найти личный чат (идемпотентно: если PRIVATE-чат, где состоят оба пользователя, уже есть — вернёт его с 200, иначе создаст с 201). Внутри `transaction.atomic()` строки обоих пользователей берутся в `select_for_update` (порядок по `id`) — параллельные запросы пары не создают дубликаты |
 | GET | `/chats/{id}/messages/` | История: страница 1 = **последние** 50 сообщений (сортировка `-created_at`), внутри страницы — по возрастанию времени |
 | POST | `/chats/{id}/send/` | Отправить сообщение (REST fallback) + broadcast в WS-группу `chat_{id}` |
 | POST | `/chats/{id}/add-member/` | Добавить участника (только админ, **только GROUP-чаты**) |
@@ -94,6 +99,8 @@ lost-dream-messenger/
 | GET | `/schema/` | OpenAPI 3.0 schema |
 
 Общие настройки DRF: JWT-аутентификация, `IsAuthenticated` по умолчанию, `PageNumberPagination` (PAGE_SIZE=50), DjangoFilterBackend.
+
+`ChatViewSet.http_method_names = ["get", "post", "delete"]` — PUT/PATCH отключены, поэтому переименовать GROUP-чат через API нельзя (см. «В планах»).
 
 ## 🔌 WebSocket API
 
@@ -115,7 +122,7 @@ lost-dream-messenger/
 
 | type | Payload | Описание |
 |------|---------|----------|
-| *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке |
+| *(json)* | `{text: "..."}` | Отправка сообщения; membership перепроверяется при каждой отправке, `last_seen` отправителя обновляется с троттлингом 60 с |
 
 **Поведение при подключении:** проверка JWT → отказ анонимам (4001) → проверка membership → отказ не-участникам (4003) → `group_add` + `accept` → отметка чужих непрочитанных как прочитанных + broadcast `messages_read` → обновление `last_seen` → presence: `HINCRBY messenger:presence {user_id} 1`, broadcast `user_status: online` **только при счётчике 1** → отправка `initial_presence` подключившемуся клиенту.
 
@@ -123,20 +130,23 @@ lost-dream-messenger/
 
 **Удаление участника:** REST `remove-member` шлёт в группу событие `member.removed` — consumer удалённого пользователя закрывает его сокет с кодом 4003 (фронт по этому коду убирает чат из списка).
 
+**Удаление чата:** REST `DELETE /chats/{id}/` шлёт в группу событие `chat.deleted` — все consumer'ы закрывают сокеты с кодом 4004 (фронт убирает чат из списка и показывает «Чат удалён»).
+
 **Коды закрытия:**
 
 | Code | Причина |
 |------|---------|
 | 4001 | Невалидный/отсутствующий JWT |
 | 4003 | Пользователь не участник чата (в т.ч. удалён из чата во время сессии) |
+| 4004 | Чат удалён |
 
 ## 🖥 Frontend (Vue 3 SPA)
 
 - **auth.ts (Pinia)**: login/register сохраняют токены в localStorage и грузят профиль через `/auth/me/`; `getUserFromToken()` при перезагрузке восстанавливает из JWT только `id` (payload не содержит имени/телефона), полный профиль догружает `App.vue` в `onMounted`. Logout — только очистка localStorage.
 - **chat.ts (Pinia)**: `loadChats()`, `selectChat()` (первая страница сообщений + `loadChatDetails()`), `loadOlderMessages()` (prepend следующей страницы; состояние `messagesPage`/`hasMoreMessages`/`isLoadingHistory`; guard от смены чата во время запроса), `addMessage()` (дедупликация по id + обновление превью в sidebar), `markAllRead()`, `removeChat()`. Presence: `onlineUsers` (Set id) + `setUserStatus()`/`setInitialPresence()`. Состояние WS: `wsStatus` (`WsStatus`, тип экспортируется и используется в useChatSocket) + `setWsStatus()` — пишет ChatWindow, отображает ChatSidebar; сбрасывается в `disconnected` в `resetMessages()`.
 - **api.ts**: axios с Bearer-interceptor; при 401 — один retry через `/auth/refresh/`, при неудаче — очистка токенов и редирект на `/login`.
-- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c (кроме кодов 4001/4003), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onClose(code)`. После reconnect история НЕ перечитывается.
-- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; при close-коде 4003 — `removeChat()` + плашка «Вы удалены из этого чата».
+- **useChatSocket.ts**: подключение по `chatId` (watch, immediate), reconnect через фиксированные 2 c (кроме кодов 4001/4003/4004), `sendMessage()` возвращает false если сокет не открыт — вызывающий код уходит в REST fallback. Колбэки: `onMessage`, `onUserStatus`, `onMessagesRead`, `onInitialPresence`, `onClose(code)`. После reconnect история НЕ перечитывается.
+- **ChatWindow.vue**: отправка (WS → fallback REST `POST /send/`, при ошибке текст возвращается в input); автоскролл по id **последнего** сообщения (догрузка истории его не сбрасывает); infinite scroll вверх (`scrollTop < 100` → `loadOlderMessages()` + якорь `scrollTop += Δ scrollHeight`); шапка: название чата, presence-точка собеседника (PRIVATE) под названием, кнопка «Участники (N)» (GROUP) справа; статус **WS-соединения** пробрасывается в store (`setWsStatus`) и показывается в сайдбаре; обработка `messages_read` с фильтром по `readerId`; при close-кодах 4003/4004 — `removeChat()` + плашка («Вы удалены из этого чата» / «Чат удалён»).
 - **ChatSidebar.vue**: список чатов (имя + превью последнего сообщения), кнопка «+ Новый чат», logout. В шапке рядом с приветствием — индикатор состояния **WS-соединения** текущего чата (точка + «на связи» / «подключение...» / «нет соединения»), отображается только когда чат выбран.
 - **GroupMembersModal.vue**: список участников (бейджи «админ»/«вы»); админ — debounced-поиск и добавление (`POST add-member/`), удаление любого (`POST remove-member/`); любой участник — «Выйти» (выход из чата, при опустевшем чате сервер его удаляет).
 - **NewChatModal.vue**: режимы «Личный / Групповой». Личный: debounced-поиск (300 мс) → `POST /chats/private/` → обновление списка + **автовыбор** чата. Групповой: название + мультивыбор пользователей из поиска (chips) → `POST /chats/ {type, name, member_ids}` → автовыбор.
@@ -186,6 +196,8 @@ docker compose down -v && docker compose up --build -d
 - [x] Добавление/удаление участников группового чата из UI (GroupMembersModal, выход из чата, live-закрытие сокета удалённого участника)
 - [x] Пагинация сообщений в UI (infinite scroll вверх с якорем позиции)
 - [ ] Перечитывание истории после WS-reconnect
+- [ ] Удаление чата из UI (бэкенд `DELETE /chats/{id}/` с правами и WS-закрытием 4004 готов, на фронте нет кнопки)
+- [ ] Переименование GROUP-чата (нужен PATCH/PUT или отдельный action — сейчас `http_method_names` без них)
 - [ ] Typing indicators («печатает...»)
 - [ ] Загрузка файлов и изображений (MEDIA_* в settings заданы, но media не раздаётся)
 - [ ] Message editing / deletion
@@ -206,12 +218,10 @@ docker compose down -v && docker compose up --build -d
 1. **SECRET_KEY и DEBUG захардкожены** в `settings.py`; `DJANGO_SECRET_KEY`/`DJANGO_DEBUG` из `.env.example` **не читаются** — перед деплоем перевести на env.
 2. **Нет rate limiting** — API и WS открыты для abuse.
 3. **Нет тестов** — покрытие 0% (backend + frontend).
-4. **`DELETE /chats/{id}/` не переопределён** — любой участник (не только админ) может удалить чат; эндпоинт не задокументирован в Swagger-описаниях.
-5. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
-6. **`create_private` без unique-ограничения** — создание обёрнуто в `transaction.atomic()`, но при параллельных запросах дубликаты личных чатов теоретически возможны.
-7. **`last_seen` обновляется только при WS connect/disconnect** — не отражает реальную активность.
-8. **Нет soft-delete** — удаление чата/сообщения физическое.
-9. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
-10. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
-11. **`MAILERS` в settings.py** — несуществующая настройка Django (мертвый код).
-12. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
+4. **`is_read` глобальный на сообщение** — в групповом чате прочтение одним участником помечает сообщение прочитанным для всех.
+5. **Нет soft-delete** — удаление чата/сообщения физическое.
+6. **Валидация пароля отключена** — `validate_password` и `min_length` в RegisterSerializer закомментированы; `AUTH_PASSWORD_VALIDATORS` в DRF не применяются автоматически.
+7. **requirements.txt**: gunicorn не используется (сервер — Daphne), ruff — dev-инструмент в prod-образе.
+8. **`MAILERS` в settings.py** — несуществующая настройка Django (мертвый код).
+9. **Concurrent 401** — interceptor в api.ts не блокирует параллельные refresh-запросы (ротация refresh-токенов не включена, поэтому не критично).
+10. **`create_private` полагается на `select_for_update`** — защита от дубликатов работает только на Postgres; на SQLite (например, в будущих тестах) запрос упадёт с `NotSupportedError`.

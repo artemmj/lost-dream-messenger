@@ -58,8 +58,8 @@ export function useChatSocket(
     ws.onclose = (event) => {
       status.value = 'disconnected'
       callbacks.onClose?.(event.code)
-      // Авто-reconnect кроме случаев отказа в авторизации/доступе
-      if (![4001, 4003].includes(event.code)) {
+      // Авто-reconnect кроме случаев отказа в авторизации/доступе/удаления чата
+      if (![4001, 4003, 4004].includes(event.code)) {
         setTimeout(() => {
           if (chatId() === id) connect(id)
         }, 2000)

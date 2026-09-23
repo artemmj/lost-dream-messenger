@@ -44,6 +44,7 @@ class ChatViewSet(viewsets.ModelViewSet):
     - list: Список чатов текущего пользователя с последним сообщением
     - retrieve: Детальная информация о чате со списком участников
     - create: Создание нового чата (создатель автоматически становится админом)
+    - destroy: Удаление чата (GROUP — только админ, PRIVATE — любой участник)
     - messages: История сообщений чата с пагинацией
     - send_message: Отправка текстового сообщения в чат
     """
@@ -102,6 +103,41 @@ class ChatViewSet(viewsets.ModelViewSet):
                     ],
                     ignore_conflicts=True,
                 )
+
+    @extend_schema(
+        summary="Удалить чат",
+        description=(
+            "Удаляет чат вместе со всеми сообщениями. GROUP-чат может удалить только "
+            "администратор чата, PRIVATE-чат — любой из двух участников (админов там нет). "
+            "Подключённые клиенты получают закрытие WebSocket с кодом 4004."
+        ),
+        responses={
+            204: OpenApiResponse(description="Чат удалён"),
+            403: OpenApiResponse(description="Нет прав на удаление чата"),
+            404: OpenApiResponse(
+                description="Чат не найден или вы не являетесь участником"
+            ),
+        },
+        tags=["Chats"],
+    )
+    def destroy(self, request, *args, **kwargs):
+        chat = self.get_object()
+
+        if chat.type == Chat.ChatType.GROUP:
+            ok, error = self._check_membership(chat, request.user, require_admin=True)
+            if not ok:
+                return Response({"detail": error}, status=status.HTTP_403_FORBIDDEN)
+
+        chat_id = chat.id
+        chat.delete()
+
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"chat_{chat_id}",
+            {"type": "chat.deleted", "chat_id": str(chat_id)},
+        )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _check_membership(self, chat, user, require_admin=False):
         """Проверка участия и прав в чате"""
@@ -347,35 +383,39 @@ class ChatViewSet(viewsets.ModelViewSet):
 
         interlocutor_id = serializer.validated_data["interlocutor_id"]
 
-        # Отдельные filter() по M2M = независимые JOIN'ы: фильтр по участникам
-        # в одном запросе с Count() обрезает JOIN и ломает подсчёт.
-        existing_chat = (
-            Chat.objects.filter(type=Chat.ChatType.PRIVATE)
-            .filter(members=request.user)
-            .filter(members__id=interlocutor_id)
-            .order_by("created_at")
-            .first()
-        )
-
-        if existing_chat:
-            return Response(
-                ChatDetailSerializer(existing_chat, context={"request": request}).data,
-                status=status.HTTP_200_OK,
-            )
-
-        # Создаём новый личный чат
         with transaction.atomic():
-            chat = Chat.objects.create(type=Chat.ChatType.PRIVATE)
-            Membership.objects.bulk_create(
-                [
-                    Membership(chat=chat, user=request.user, is_admin=False),
-                    Membership(chat=chat, user_id=interlocutor_id, is_admin=False),
-                ]
+            # Строки обоих пользователей блокируются в детерминированном порядке
+            # (по id) — параллельные запросы той же пары проходят последовательно
+            # и не могут создать два чата; одинаковый порядок исключает deadlock.
+            list(
+                User.objects.select_for_update()
+                .filter(id__in=[request.user.id, interlocutor_id])
+                .order_by("id")
             )
+
+            # Отдельные filter() по M2M = независимые JOIN'ы: фильтр по участникам
+            # в одном запросе с Count() обрезает JOIN и ломает подсчёт.
+            chat = (
+                Chat.objects.filter(type=Chat.ChatType.PRIVATE)
+                .filter(members=request.user)
+                .filter(members__id=interlocutor_id)
+                .order_by("created_at")
+                .first()
+            )
+            created = chat is None
+
+            if created:
+                chat = Chat.objects.create(type=Chat.ChatType.PRIVATE)
+                Membership.objects.bulk_create(
+                    [
+                        Membership(chat=chat, user=request.user, is_admin=False),
+                        Membership(chat=chat, user_id=interlocutor_id, is_admin=False),
+                    ]
+                )
 
         return Response(
             ChatDetailSerializer(chat, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
 

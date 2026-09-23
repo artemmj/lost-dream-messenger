@@ -12,7 +12,13 @@ const chatStore = useChatStore()
 const inputText = ref('')
 const messagesContainer = ref<HTMLElement>()
 const showMembers = ref(false)
-const removedFromChat = ref(false)
+// Сообщение вместо чата, когда сервер закрыл сокет по доступу (4003/4004)
+const closedNotice = ref('')
+
+const CLOSE_NOTICES: Record<number, string> = {
+  4003: 'Вы удалены из этого чата',
+  4004: 'Чат удалён',
+}
 
 // WebSocket подключение
 const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
@@ -27,10 +33,11 @@ const { status: wsStatus, sendMessage: sendWs } = useChatSocket(
       if (readerId !== auth.user?.id) chatStore.markAllRead(auth.user?.id || '')
     },
     onInitialPresence: (userIds) => chatStore.setInitialPresence(userIds),
-    // 4003 — не участник чата (удалён во время сессии или чат недоступен)
+    // 4003 — не участник чата (удалён во время сессии), 4004 — чат удалён
     onClose: (code) => {
-      if (code === 4003 && chatStore.selectedChatId) {
-        removedFromChat.value = true
+      const notice = CLOSE_NOTICES[code]
+      if (notice && chatStore.selectedChatId) {
+        closedNotice.value = notice
         chatStore.removeChat(chatStore.selectedChatId)
       }
     },
@@ -47,7 +54,7 @@ let isChatSwitch = true
 let lastScrollTop = 0
 
 watch(() => chatStore.selectedChatId, () => {
-  removedFromChat.value = false
+  closedNotice.value = ''
   isChatSwitch = true
   lastScrollTop = 0
 })
@@ -174,7 +181,7 @@ async function handleSend() {
         <button :disabled="!inputText.trim()" @click="handleSend">→</button>
       </div>
     </template>
-    <div v-else-if="removedFromChat" class="empty-state">Вы удалены из этого чата</div>
+    <div v-else-if="closedNotice" class="empty-state">{{ closedNotice }}</div>
     <div v-else class="empty-state">Выберите чат или создайте новый</div>
 
     <GroupMembersModal :is-open="showMembers" @close="showMembers = false" />

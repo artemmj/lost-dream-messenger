@@ -147,6 +147,9 @@ class ChatMemberSerializer(UserSerializer):
 
     is_admin = serializers.BooleanField()
 
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + ("is_admin",)
+
 
 class ChatDetailSerializer(serializers.ModelSerializer):
     members = serializers.SerializerMethodField()

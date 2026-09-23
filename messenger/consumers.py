@@ -3,11 +3,15 @@ import os
 import redis.asyncio as aioredis
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 
+from .activity import touch_last_seen
 from .models import Membership, Message
 from .ws_auth import get_user_from_scope
+
+User = get_user_model()
 
 PRESENCE_KEY = "messenger:presence"
 
@@ -145,6 +149,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # Сохраняем в БД
         message = await self._save_message(text)
 
+        # Отправка сообщения — реальная активность, а не только факт подключения
+        await self._touch_last_seen()
+
         # Broadcast всем в группе
         await self.channel_layer.group_send(
             self.group_name,
@@ -184,6 +191,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if event.get("user_id") == str(self.user.id):
             await self.close(code=4003)
 
+    async def chat_deleted(self, event):
+        """Чат удалён: закрываем сокеты всех участников."""
+        await self.close(code=4004)
+
     # --- DB operations (sync → async safe) ---
 
     @database_sync_to_async
@@ -209,10 +220,15 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _update_last_seen(self):
-        from django.contrib.auth import get_user_model
+        now = timezone.now()
+        User.objects.filter(id=self.user.id).update(last_seen=now)
+        # Синхронизируем кэш в памяти: иначе троттлинг в touch_last_seen
+        # не сработает и каждое сообщение будет дёргать БД впустую
+        self.user.last_seen = now
 
-        User = get_user_model()
-        User.objects.filter(id=self.user.id).update(last_seen=timezone.now())
+    @database_sync_to_async
+    def _touch_last_seen(self):
+        touch_last_seen(self.user)
 
     # --- Presence (Redis: hash user_id → счётчик активных соединений) ---
 
